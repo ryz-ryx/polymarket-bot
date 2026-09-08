@@ -1,0 +1,16 @@
+# Secrets - NEVER commit
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+*.egg-info/
+
+# Runtime state / accumulating data - this is machine-local, not source
+data/*.csv
+data/*.json
+
+# OS
+.DS_Store
+Thumbs.db
