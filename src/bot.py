@@ -453,6 +453,21 @@ class Polymarket5mBot:
         except Exception as e:
             logger.error(f"Error during orphaned-window recovery: {e}")
 
+        # Diagnostic: a full ~4h run showed find_active_5min_market/_fetch_single_book/
+        # get_market_resolution ALL failing 100% of the time (0 trades, 0 on-chain
+        # confirmations) while every Binance call succeeded -- and every failure was
+        # previously silent. Check Polymarket connectivity loudly at startup instead of
+        # discovering it three minutes into the first window.
+        try:
+            reachable = await self.market_feed.check_connectivity()
+            if not reachable:
+                logger.warning(
+                    "Polymarket API connectivity check FAILED at startup -- expect "
+                    "BLOCKED_PHANTOM and Binance-fallback resolutions until this clears."
+                )
+        except Exception as e:
+            logger.error(f"Error during Polymarket connectivity check: {e}")
+
         spot_task = asyncio.create_task(self.spot_feed.start())
         deribit_task = asyncio.create_task(self.deribit_feed.start())
         multi_asset_task = asyncio.create_task(self.multi_asset_feed.start())

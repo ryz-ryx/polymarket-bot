@@ -30,7 +30,16 @@ class MultiAssetResearchFeed:
 
     async def start(self):
         self.is_running = True
-        self._session = aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            from aiohttp.resolver import AsyncResolver
+            resolver = AsyncResolver(nameservers=["1.1.1.1", "8.8.8.8"])
+            connector = aiohttp.TCPConnector(resolver=resolver)
+        except Exception as e:
+            logger.debug(f"AsyncResolver init notice: {e}")
+            connector = None
+
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        self._session = aiohttp.ClientSession(connector=connector, headers=headers)
         logger.info("Starting Multi-Asset Research Feed (ETH & SOL 5m)...")
         asyncio.create_task(self._poll_loop())
 
@@ -44,7 +53,7 @@ class MultiAssetResearchFeed:
             return None, None
         try:
             url = f"{self.CLOB_API}/book?token_id={token_id}"
-            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     bids = data.get("bids", [])
@@ -52,8 +61,15 @@ class MultiAssetResearchFeed:
                     best_bid = sorted([float(b["price"]) for b in bids], reverse=True)[0] if bids else None
                     best_ask = sorted([float(a["price"]) for a in asks])[0] if asks else None
                     return best_bid, best_ask
-        except Exception:
-            pass
+                else:
+                    # DIAGNOSTIC: was completely silent before (no log at all, not even
+                    # debug) -- ETH(P)/SOL(P) showed N/A for the entire ~4h run with zero
+                    # visibility into why. This is research-only data (doesn't gate trades)
+                    # but the silent failure hid a real problem shared with PolymarketFeed.
+                    body = await resp.text()
+                    logger.warning(f"MultiAssetFeed._fetch_book: HTTP {resp.status} for token {token_id}: {body[:200]}")
+        except Exception as e:
+            logger.warning(f"MultiAssetFeed._fetch_book: {type(e).__name__} for token {token_id}: {e}")
         return None, None
 
     async def _discover_asset_market(self, asset: str, window_ts: int) -> Optional[Tuple[str, str, str]]:
@@ -62,7 +78,7 @@ class MultiAssetResearchFeed:
         slug = f"{asset}-updown-5m-{window_ts}"
         url = f"{self.GAMMA_API}/events?slug={slug}"
         try:
-            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                 if resp.status == 200:
                     events = await resp.json()
                     if events and isinstance(events, list):
@@ -79,8 +95,11 @@ class MultiAssetResearchFeed:
                                         clob_tokens = []
                                 if len(clob_tokens) >= 2:
                                     return slug, clob_tokens[0], clob_tokens[1]
-        except Exception:
-            pass
+                else:
+                    body = await resp.text()
+                    logger.warning(f"MultiAssetFeed._discover_asset_market: HTTP {resp.status} for {slug}: {body[:200]}")
+        except Exception as e:
+            logger.warning(f"MultiAssetFeed._discover_asset_market: {type(e).__name__} for {slug}: {e}")
         return None
 
     async def _poll_loop(self):

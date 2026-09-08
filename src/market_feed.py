@@ -25,7 +25,16 @@ class PolymarketFeed:
 
     async def get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+            try:
+                from aiohttp.resolver import AsyncResolver
+                resolver = AsyncResolver(nameservers=["1.1.1.1", "8.8.8.8"])
+                connector = aiohttp.TCPConnector(resolver=resolver)
+            except Exception as e:
+                logger.debug(f"AsyncResolver init notice: {e}")
+                connector = None
+
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            self.session = aiohttp.ClientSession(connector=connector, headers=headers)
         return self.session
 
     def get_slug_for_window(self, window_ts: int) -> str:
@@ -45,7 +54,7 @@ class PolymarketFeed:
             slug = self.get_slug_for_window(w_ts)
             url = f"{self.GAMMA_API}/events?slug={slug}"
             try:
-                async with session.get(url, timeout=4) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                     if resp.status == 200:
                         events = await resp.json()
                         if events and isinstance(events, list):
@@ -60,7 +69,7 @@ class PolymarketFeed:
                                             clob_tokens = json.loads(clob_tokens)
                                         except Exception:
                                             clob_tokens = []
-                                    
+
                                     if len(clob_tokens) >= 2:
                                         self.current_window_ts = w_ts
                                         self.token_id_yes = clob_tokens[0]
@@ -72,10 +81,45 @@ class PolymarketFeed:
                                             f"Tokens: YES={self.token_id_yes[:10]}... NO={self.token_id_no[:10]}..."
                                         )
                                         return self.current_market
+                    else:
+                        # DIAGNOSTIC: this was completely silent before (no branch at all for
+                        # non-200), and this exact method is the one that must succeed for the
+                        # bot to ever get real CLOB tokens -- a run that never once logs
+                        # "Locked onto live 5m market" for ~40 straight windows means this call
+                        # is failing every single time, silently.
+                        body = await resp.text()
+                        logger.warning(f"find_active_5min_market: HTTP {resp.status} for {slug}: {body[:200]}")
             except Exception as e:
-                logger.debug(f"Error querying slug {slug}: {e}")
+                # Was logger.debug (invisible at normal INFO verbosity).
+                logger.warning(f"find_active_5min_market: {type(e).__name__} for {slug}: {e}")
 
         return self.current_market
+
+    async def check_connectivity(self) -> bool:
+        """
+        One-shot startup health check against both Polymarket API hosts this feed depends
+        on. Added because a full run showed find_active_5min_market/_fetch_single_book/
+        get_market_resolution ALL failing 100% of the time for ~4 hours while Binance calls
+        (a different host, fresh ephemeral sessions) succeeded every time -- and every one
+        of those failures was previously silent. This logs a clear pass/fail at INFO right
+        at startup instead of waiting for the first real trade window to find out.
+        """
+        session = await self.get_session()
+        ok = True
+        for name, url in (
+            ("Gamma API", f"{self.GAMMA_API}/events?slug={self.get_slug_for_window(int(time.time() // 300) * 300)}"),
+            ("CLOB API", f"{self.CLOB_API}/"),
+        ):
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    logger.info(f"Polymarket connectivity check: {name} -> HTTP {resp.status}")
+                    if resp.status >= 400 and resp.status != 404:
+                        # 404 on a bare CLOB_API root is expected/harmless; anything else >=400 is not.
+                        ok = False
+            except Exception as e:
+                logger.warning(f"Polymarket connectivity check: {name} -> {type(e).__name__}: {e}")
+                ok = False
+        return ok
 
     @staticmethod
     def simulate_walk_book(asks: List[Dict[str, float]], required_usd: float) -> Tuple[Optional[float], float, float]:
@@ -123,20 +167,27 @@ class PolymarketFeed:
         session = await self.get_session()
         try:
             url = f"{self.CLOB_API}/book?token_id={token_id}"
-            async with session.get(url, timeout=3) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     raw_bids = data.get("bids", [])
                     raw_asks = data.get("asks", [])
-                    
+
                     parsed_bids = [{"price": float(b["price"]), "size": float(b["size"])} for b in raw_bids if "price" in b and "size" in b]
                     parsed_asks = [{"price": float(a["price"]), "size": float(a["size"])} for a in raw_asks if "price" in a and "size" in a]
 
                     best_bid = sorted([b["price"] for b in parsed_bids], reverse=True)[0] if parsed_bids else None
                     best_ask = sorted([a["price"] for a in parsed_asks])[0] if parsed_asks else None
                     return best_bid, best_ask, parsed_bids, parsed_asks
+                else:
+                    body = await resp.text()
+                    logger.warning(f"_fetch_single_book: HTTP {resp.status} for token {token_id}: {body[:200]}")
         except Exception as e:
-            logger.debug(f"Error fetching book for token {token_id}: {e}")
+            # Was logger.debug (invisible at normal INFO verbosity) -- BLOCKED_PHANTOM fired
+            # on essentially every signal all night, which only happens when direct_ask is
+            # None, which only happens when this call (or find_active_5min_market before it)
+            # fails. Needs to be loud until we know why.
+            logger.warning(f"_fetch_single_book: {type(e).__name__} for token {token_id}: {e}")
         return None, None, [], []
 
     async def get_live_market_prices(self) -> Dict[str, Any]:
