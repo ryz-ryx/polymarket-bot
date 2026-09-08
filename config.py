@@ -22,4 +22,17 @@ class BotConfig(BaseModel):
     kelly_fraction: float = float(os.getenv("KELLY_FRACTION", "0.25"))
     spot_exchange: str = os.getenv("SPOT_EXCHANGE", "binance").lower()
 
+    # Discord / Telegram alerts (both optional -- unset means that channel is silently
+    # disabled). Never commit real values here; put them in your local .env only.
+    discord_webhook_url: str = os.getenv("DISCORD_WEBHOOK_URL", "")
+    telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
+    notify_on_startup: bool = os.getenv("NOTIFY_ON_STARTUP", "true").lower() == "true"
+    notify_on_connectivity_failure: bool = os.getenv("NOTIFY_ON_CONNECTIVITY_FAILURE", "true").lower() == "true"
+    notify_on_trade: bool = os.getenv("NOTIFY_ON_TRADE", "true").lower() == "true"
+    notify_on_settlement: bool = os.getenv("NOTIFY_ON_SETTLEMENT", "true").lower() == "true"
+    notify_on_rollup: bool = os.getenv("NOTIFY_ON_ROLLUP", "true").lower() == "true"
+    notify_on_crash: bool = os.getenv("NOTIFY_ON_CRASH", "true").lower() == "true"
+
 config = BotConfig()

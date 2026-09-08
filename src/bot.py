@@ -16,6 +16,7 @@ from src.event_logger import TradeEventLogger, EVENT_LOG
 from src.deribit_feed import DeribitFeed
 from src.multi_asset_feed import MultiAssetResearchFeed
 from src.strategies.claud_quant import ClaudQuantBinaryOptionStrategy, estimate_taker_fee_fraction
+from src import notifier
 
 RESOLUTIONS_FILE = "data/pending_resolutions.json"
 RECONCILIATION_FILE = "data/fallback_reconciliation.json"
@@ -185,6 +186,13 @@ class Polymarket5mBot:
                     )
                     self.risk_manager.record_trade_result(pnl=window_pnl)
                     self._record_and_maybe_log_rollup(window_id, window_pnl, had_position)
+                    if had_position and config.notify_on_settlement:
+                        result_emoji = "\U0001F7E2" if window_pnl > 0 else ("\U0001F534" if window_pnl < 0 else "⚪")
+                        notifier.alert(
+                            f"{result_emoji} SETTLED (on-chain): window {window_id} -> "
+                            f"{'UP' if outcome == 1 else 'DOWN'}{divergence_msg} | PnL: ${window_pnl:+.2f} "
+                            f"| cash=${self.executor.simulated_balance:.2f}"
+                        )
                 except Exception as e:
                     logger.error(f"Error settling window positions: {e}")
                 changed = True
@@ -216,6 +224,13 @@ class Polymarket5mBot:
                     )
                     self.risk_manager.record_trade_result(pnl=window_pnl)
                     self._record_and_maybe_log_rollup(window_id, window_pnl, len(positions_snapshot) > 0)
+                    if positions_snapshot and config.notify_on_settlement:
+                        result_emoji = "\U0001F7E2" if window_pnl > 0 else ("\U0001F534" if window_pnl < 0 else "⚪")
+                        notifier.alert(
+                            f"{result_emoji} SETTLED (Binance fallback, unconfirmed): window {window_id} -> "
+                            f"{'UP' if binance_estimate == 1 else 'DOWN'} | PnL: ${window_pnl:+.2f} "
+                            f"| cash=${self.executor.simulated_balance:.2f}"
+                        )
 
                     # Queue for reconciliation regardless of whether there were open
                     # positions -- the calibration label itself still needs verifying.
@@ -299,6 +314,12 @@ class Polymarket5mBot:
                 f"Avg Realized: {real_str} | Net PnL: ${net_pnl:+.2f} | "
                 f"Funnel (cumulative): {funnel_str}"
             )
+            if config.notify_on_rollup:
+                notifier.alert(
+                    f"\U0001F4CA ROLLUP (last {ROLLUP_WINDOW_COUNT} windows): "
+                    f"Trades {len(traded)}/{len(recent)} | Win Rate {win_rate:.0f}% | "
+                    f"Net PnL ${net_pnl:+.2f} | Cash ${self.executor.simulated_balance:.2f}"
+                )
             self._funnel_tally = {}
 
     async def _poll_fallback_reconciliation(self):
@@ -464,6 +485,17 @@ class Polymarket5mBot:
                 logger.warning(
                     "Polymarket API connectivity check FAILED at startup -- expect "
                     "BLOCKED_PHANTOM and Binance-fallback resolutions until this clears."
+                )
+                if config.notify_on_connectivity_failure:
+                    notifier.alert(
+                        "\U0001F534 Polymarket5mBot: connectivity check FAILED at startup. "
+                        "Gamma/CLOB API unreachable -- expect no real trades or on-chain "
+                        "settlements until this clears. Check your network/DNS."
+                    )
+            elif config.notify_on_startup:
+                notifier.alert(
+                    f"✅ Polymarket5mBot started ({'PAPER TRADING' if config.paper_trading else 'LIVE'}) "
+                    f"| {config.target_asset} | Polymarket connectivity OK."
                 )
         except Exception as e:
             logger.error(f"Error during Polymarket connectivity check: {e}")
@@ -823,6 +855,14 @@ class Polymarket5mBot:
                                         )
                                         self.last_trade_time = now
 
+                                        if config.notify_on_trade:
+                                            notifier.alert(
+                                                f"\U0001F4C8 TRADE: {signal['outcome']} on window {self.current_window_id} "
+                                                f"({active_slug}) | ${size:.2f} @ {vwap_price:.3f} | "
+                                                f"model p={signal['estimated_prob']*100:.1f}% edge={vwap_edge*100:+.2f}% "
+                                                f"| cash=${self.executor.simulated_balance:.2f}"
+                                            )
+
                                         self.event_logger.log_event(
                                             window_id=self.current_window_id,
                                             tau_sec=time_remaining_sec,
@@ -879,6 +919,7 @@ class Polymarket5mBot:
             self.spot_feed.stop()
             await self.deribit_feed.stop()
             await self.multi_asset_feed.stop()
+            await notifier.close()
             spot_task.cancel()
             deribit_task.cancel()
             multi_asset_task.cancel()
