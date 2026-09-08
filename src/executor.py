@@ -4,6 +4,7 @@ import time
 from typing import Dict, Any, Optional, List
 from loguru import logger
 from config import config
+from src.strategies.claud_quant import estimate_taker_fee_fraction
 
 POSITIONS_FILE = "data/open_positions.json"
 
@@ -84,7 +85,15 @@ class OrderExecutor:
     ) -> Dict[str, Any]:
         if self.paper_trading:
             shares = amount_usd / max(price, 0.01)
-            self.simulated_balance -= amount_usd
+            # Real money charges a taker fee here (Polymarket crypto_fees_v2: takerOnly,
+            # fee_fraction = rate * (1-price), live-verified 2026-09-08 -- see
+            # estimate_taker_fee_fraction()). Paper trading used to ignore this entirely,
+            # which meant every reported paper PnL number was fee-free fantasy money --
+            # reconstructing the first 19 real settled trades showed real fees would have
+            # consumed ~27% of the reported edge ($11.50 of $41.79 gross). Deducting it here
+            # makes paper-trading economics match what live execution would actually cost.
+            fee_paid = amount_usd * estimate_taker_fee_fraction(price)
+            self.simulated_balance -= (amount_usd + fee_paid)
             position = {
                 "window_id": window_id,
                 "slug": slug,
@@ -93,13 +102,14 @@ class OrderExecutor:
                 "amount_usd": amount_usd,
                 "price": price,
                 "shares": shares,
+                "fee_paid": fee_paid,
                 "timestamp": time.time()
             }
             self.open_paper_positions.append(position)
             self._save_positions()
             logger.info(
                 f"[PAPER EXEC] BUY {outcome} (Win {window_id}) | "
-                f"Size: ${amount_usd:.2f} @ {price:.3f} ({shares:.2f} shares) | "
+                f"Size: ${amount_usd:.2f} @ {price:.3f} ({shares:.2f} shares) | Fee: ${fee_paid:.3f} | "
                 f"Remaining Cash: ${self.simulated_balance:.2f}"
             )
             return {

@@ -1,4 +1,5 @@
 import os
+import csv
 import json
 import asyncio
 import time
@@ -11,12 +12,31 @@ from src.market_feed import PolymarketFeed
 from src.risk_manager import RiskManager
 from src.executor import OrderExecutor
 from src.calibrator import EmpiricalCalibrator
-from src.event_logger import TradeEventLogger
-from src.strategies.claud_quant import ClaudQuantBinaryOptionStrategy
+from src.event_logger import TradeEventLogger, EVENT_LOG
+from src.deribit_feed import DeribitFeed
+from src.multi_asset_feed import MultiAssetResearchFeed
+from src.strategies.claud_quant import ClaudQuantBinaryOptionStrategy, estimate_taker_fee_fraction
 
 RESOLUTIONS_FILE = "data/pending_resolutions.json"
 RECONCILIATION_FILE = "data/fallback_reconciliation.json"
-RECONCILIATION_MAX_AGE_SEC = 3600.0  # give up chasing on-chain confirmation after 1hr
+RECONCILIATION_MAX_AGE_SEC = 7200.0  # give up chasing on-chain confirmation after 2hr (was 1hr --
+                                      # raised after live evidence, see RESOLUTION_FALLBACK_TIMEOUT_SEC below)
+
+# How long to wait for real on-chain confirmation before settling on the Binance-close guess
+# instead. Live-verified 2026-09-08 14:13 UTC by querying Gamma API directly for 4 just-closed
+# BTC 5-min markets: `closed` stays False and outcomePrices sits at a fuzzy last-trade value
+# (e.g. ["0.995","0.005"]) for a while after endDate, only crystallizing to the canonical
+# ["1","0"]/["0","1"] between ~3.5 and ~13.5+ minutes after close. The old 240s (4 min) timeout
+# was firing before the real answer arrived on essentially every window, which meant the bot
+# was running almost entirely on Binance-fallback guesses (verified live: 100% fallback rate
+# across 9 consecutive windows after a restart) instead of ground-truth on-chain settlement --
+# the exact thing the whole fallback-reconciliation subsystem exists to avoid relying on.
+RESOLUTION_FALLBACK_TIMEOUT_SEC = 900.0  # 15 min, ~2x the worst latency observed live
+TWAP_SETTLEMENT_WINDOW_SEC = 60.0  # provisional -- see [ESTIMATOR SCORECARD] logging; public
+                                    # reporting disagrees on 30s vs 60s for Polymarket's real
+                                    # Chainlink TWAP settlement window
+
+ROLLUP_WINDOW_COUNT = 10  # Proposal 4: print a rolling profitability summary every N settled windows
 
 class Polymarket5mBot:
     def __init__(self):
@@ -34,9 +54,18 @@ class Polymarket5mBot:
         )
         self.market_feed = PolymarketFeed(asset=config.target_asset)
         self.spot_feed = SpotFeed(symbol=f"{config.target_asset}USDT")
+        self.deribit_feed = DeribitFeed()
+        self.multi_asset_feed = MultiAssetResearchFeed()
         self.calibrator = EmpiricalCalibrator()
         self.event_logger = TradeEventLogger()
         self.last_trade_time = 0.0
+
+        # Proposal 4: periodic profitability rollup (in-memory diagnostic, resets on
+        # restart -- calibration_log.csv / trade_events.csv remain the durable source
+        # of truth; this just surfaces a rolling trend in stdout every
+        # ROLLUP_WINDOW_COUNT settled windows without needing analyze_calibration.py).
+        self.rollup_history: List[Dict[str, Any]] = []
+        self._funnel_tally: Dict[str, int] = {}
 
         self.current_window_id = int(time.time() // 300)
         self.current_window_start = self.current_window_id * 300
@@ -148,17 +177,19 @@ class Polymarket5mBot:
                     logger.error(f"Error resolving calibrator window: {e}")
 
                 try:
+                    had_position = any(p["window_id"] == window_id for p in self.executor.open_paper_positions)
                     window_pnl = self.executor.settle_window_positions(
                         window_id=window_id,
                         realized_up=outcome,
                         source="POLYMARKET_ONCHAIN"
                     )
                     self.risk_manager.record_trade_result(pnl=window_pnl)
+                    self._record_and_maybe_log_rollup(window_id, window_pnl, had_position)
                 except Exception as e:
                     logger.error(f"Error settling window positions: {e}")
                 changed = True
 
-            elif now - queued_at > 240:
+            elif now - queued_at > RESOLUTION_FALLBACK_TIMEOUT_SEC:
                 logger.warning(f"Resolution timeout for {slug}. Falling back to Binance snapshot estimate: {binance_estimate}")
                 try:
                     self.calibrator.resolve_window(
@@ -184,6 +215,7 @@ class Polymarket5mBot:
                         source="BINANCE_FALLBACK"
                     )
                     self.risk_manager.record_trade_result(pnl=window_pnl)
+                    self._record_and_maybe_log_rollup(window_id, window_pnl, len(positions_snapshot) > 0)
 
                     # Queue for reconciliation regardless of whether there were open
                     # positions -- the calibration label itself still needs verifying.
@@ -205,6 +237,69 @@ class Polymarket5mBot:
         self.pending_resolutions = still_pending
         if changed:
             self._save_pending_resolutions()
+
+    def _record_and_maybe_log_rollup(self, window_id: int, window_pnl: float, had_position: bool):
+        """
+        Proposal 4: periodic profitability rollup. Records this settled window's outcome
+        into a bounded in-memory history and, every ROLLUP_WINDOW_COUNT settled windows,
+        logs a rolling summary: win rate, average predicted edge (model-vs-market
+        probability gap at entry, from trade_events.csv EXECUTED rows), average realized
+        $ return per trade, net PnL over the window, and cumulative funnel block counts
+        (NO_SIGNAL / BLOCKED_* / EXECUTED). This is a lightweight diagnostic layered on
+        top of the durable CSV logs -- it resets on restart and does not retroactively
+        adjust for later fallback-reconciliation PnL corrections (those still flow into
+        risk_manager.daily_pnl and are logged separately via [FALLBACK CORRECTION]).
+        "Predicted edge" and "realized return" are reported on their own native scales
+        (probability-space vs dollars) rather than forced into one number, since that's
+        what the underlying logs actually give us.
+        """
+        predicted_edge = None
+        try:
+            if os.path.exists(EVENT_LOG):
+                with open(EVENT_LOG, "r", newline="", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    window_rows = [r for r in reader if r.get("window_id") == str(window_id)]
+                for r in window_rows:
+                    status = r.get("status", "UNKNOWN")
+                    self._funnel_tally[status] = self._funnel_tally.get(status, 0) + 1
+                exec_rows = [r for r in window_rows if r.get("status") == "EXECUTED" and r.get("real_edge")]
+                if exec_rows:
+                    edges = [float(r["real_edge"]) for r in exec_rows]
+                    predicted_edge = sum(edges) / len(edges)
+        except Exception as e:
+            logger.debug(f"Rollup: funnel/edge tally read failed for window {window_id}: {e}")
+
+        self.rollup_history.append({
+            "window_id": window_id,
+            "had_position": had_position,
+            "pnl": window_pnl,
+            "predicted_edge": predicted_edge,
+        })
+        max_history = ROLLUP_WINDOW_COUNT * 5
+        if len(self.rollup_history) > max_history:
+            self.rollup_history = self.rollup_history[-max_history:]
+
+        if len(self.rollup_history) % ROLLUP_WINDOW_COUNT == 0:
+            recent = self.rollup_history[-ROLLUP_WINDOW_COUNT:]
+            traded = [r for r in recent if r["had_position"]]
+            wins = [r for r in traded if r["pnl"] > 0]
+            win_rate = (len(wins) / len(traded) * 100.0) if traded else 0.0
+            net_pnl = sum(r["pnl"] for r in recent)
+            pred_edges = [r["predicted_edge"] for r in traded if r["predicted_edge"] is not None]
+            avg_pred_edge = (sum(pred_edges) / len(pred_edges)) if pred_edges else None
+            avg_realized_return = (sum(r["pnl"] for r in traded) / len(traded)) if traded else None
+
+            pred_str = f"{avg_pred_edge * 100:+.2f}%" if avg_pred_edge is not None else "N/A"
+            real_str = f"${avg_realized_return:+.2f}/trade" if avg_realized_return is not None else "N/A"
+            funnel_str = " ".join(f"{k}:{v}" for k, v in sorted(self._funnel_tally.items())) or "N/A"
+
+            logger.info(
+                f"[ROLLUP last {ROLLUP_WINDOW_COUNT} windows] Trades: {len(traded)}/{len(recent)} | "
+                f"Win Rate: {win_rate:.0f}% | Avg Predicted Edge: {pred_str} | "
+                f"Avg Realized: {real_str} | Net PnL: ${net_pnl:+.2f} | "
+                f"Funnel (cumulative): {funnel_str}"
+            )
+            self._funnel_tally = {}
 
     async def _poll_fallback_reconciliation(self):
         """
@@ -280,11 +375,87 @@ class Polymarket5mBot:
         if changed:
             self._save_fallback_reconciliation()
 
+    async def _recover_orphaned_windows(self):
+        """
+        Handles a gap the persistence fixes didn't cover: if the bot is offline across
+        an ENTIRE window's close (crashes mid-window, restarts much later, possibly
+        several windows after), __init__ sets self.current_window_id to whatever window
+        is live *now* -- the rollover-detection block in run() only fires the "queue for
+        resolution" logic when it personally observes a live window_id change, so a
+        window that closed while nothing was running never gets queued at all. Its
+        buffered ticks (correctly persisted to pending_window_observations.json) then
+        sit there forever: never resolved, never flushed to calibration_log.csv, never
+        cleaned up. Verified live: window 5962900 got 15 ticks logged, then the process
+        went down and didn't come back until window 5962908 -- 8 windows (40 minutes)
+        later -- leaving those 15 ticks permanently stuck with no path to resolution.
+
+        Fix: on startup, diff the window_ids present in the observation buffer against
+        the windows we actually know about (current live window + anything already
+        queued for resolution). Anything left over is orphaned -- recover its strike
+        and an approximate close price via Binance klines (the same REST recovery used
+        for the live strike) and queue it for resolution like any other closed window.
+        """
+        known_ids = {self.current_window_id}
+        known_ids.update(item["window_id"] for item in self.pending_resolutions)
+        known_ids.update(item["window_id"] for item in self.fallback_reconciliation)
+
+        orphaned_ids = sorted({
+            o["window_id"] for o in self.calibrator.pending_window_observations
+        } - known_ids)
+
+        if not orphaned_ids:
+            return
+
+        for window_id in orphaned_ids:
+            window_start = window_id * 300
+            window_close = window_start + 300
+            n_ticks = sum(1 for o in self.calibrator.pending_window_observations if o["window_id"] == window_id)
+
+            strike_k = await self.spot_feed.get_exact_window_open_price(window_start)
+            close_price = await self.spot_feed.get_exact_window_open_price(window_close)
+
+            if strike_k is None or close_price is None:
+                logger.error(
+                    f"[ORPHAN RECOVERY] Window {window_id} has {n_ticks} orphaned observations from a restart "
+                    f"gap that skipped its close entirely, but Binance klines couldn't recover its prices. "
+                    f"These ticks will remain unresolved."
+                )
+                continue
+
+            binance_estimate = 1 if close_price >= strike_k else 0
+            slug = self.market_feed.get_slug_for_window(window_start)
+            logger.warning(
+                f"[ORPHAN RECOVERY] Window {window_id} had {n_ticks} orphaned observations (restart gap skipped "
+                f"its close). Recovered K=${strike_k:.2f}, close~${close_price:.2f} via Binance klines. "
+                f"Queuing for resolution (Slug: {slug})."
+            )
+            self.pending_resolutions.append({
+                "window_id": window_id,
+                "slug": slug,
+                "strike_k": strike_k,
+                "settlement_price": close_price,
+                "binance_estimate": binance_estimate,
+                "snapshot_price": close_price,
+                "twap_30": None,
+                "twap_60": None,
+                "queued_at": time.time(),
+                "last_checked": 0.0
+            })
+
+        self._save_pending_resolutions()
+
     async def run(self):
         logger.info(f"Starting Polymarket 5-Minute Claud-Quant Bot for {config.target_asset}")
         logger.info(f"Mode: {'[PAPER TRADING]' if config.paper_trading else '[LIVE EXECUTION]'}")
-        
+
+        try:
+            await self._recover_orphaned_windows()
+        except Exception as e:
+            logger.error(f"Error during orphaned-window recovery: {e}")
+
         spot_task = asyncio.create_task(self.spot_feed.start())
+        deribit_task = asyncio.create_task(self.deribit_feed.start())
+        multi_asset_task = asyncio.create_task(self.multi_asset_feed.start())
 
         try:
             while True:
@@ -354,21 +525,72 @@ class Polymarket5mBot:
                     logger.error(f"Unexpected error in _poll_fallback_reconciliation: {e}")
 
                 time_remaining_sec = max(300.0 - (now - self.current_window_start), 1.0)
-                vol_ann = self.spot_feed.annualized_vol
+                raw_vol_ann = self.spot_feed.annualized_vol
                 ofi = self.spot_feed.get_ofi_normalized()
                 momentum = self.spot_feed.get_momentum(lookback_seconds=10.0)
+
+                # Proposal 2: Deribit DVOL implied volatility blending
+                # DVOL is forward-looking 30-day implied vol (decimal, e.g. 0.39 for 39%).
+                # Blend 20% DVOL prior with 80% realized trailing vol when available,
+                # stabilizing vol estimation against startup noise or sudden regime shifts.
+                dvol_ann = self.deribit_feed.get_dvol()
+                if dvol_ann is not None:
+                    vol_ann = 0.80 * raw_vol_ann + 0.20 * dvol_ann
+                else:
+                    vol_ann = raw_vol_ann
+
+                # Proposal 3: Cross-exchange composite reference price tracking
+                # Compares Binance mid against Deribit's multi-exchange composite index
+                composite_idx = self.deribit_feed.get_composite_index()
+                basis_spread = (spot_price - composite_idx) if composite_idx is not None else None
+
+                # Microprice (Stoikov): size-weighted mid that leans toward the thinner side of
+                # the book, i.e. the side more likely to get run through next. Used ONLY as the
+                # pricing input (S_t) for the strategy's edge calculation -- realized vol,
+                # window rollover, and settlement estimation all deliberately keep using the
+                # plain mid (spot_price) since microprice is a short-horizon directional signal,
+                # not a "true price" reference.
+                pricing_spot = self.spot_feed.microprice if self.spot_feed.microprice is not None else spot_price
+
+                # Trailing partial-TWAP of the current closing window's averaging period, for
+                # the Asian-option-style variance adjustment in calculate_fair_probability.
+                known_avg_price = None
+                if time_remaining_sec < TWAP_SETTLEMENT_WINDOW_SEC:
+                    elapsed_in_twap_window = TWAP_SETTLEMENT_WINDOW_SEC - time_remaining_sec
+                    known_avg_price = self.spot_feed.get_trailing_twap(elapsed_in_twap_window)
 
                 await self.market_feed.find_active_5min_market()
                 live_quotes = await self.market_feed.get_live_market_prices()
 
                 norm_momentum = max(min(momentum / 50.0, 1.0), -1.0)
                 raw_p_model, z = self.strategy.calculate_fair_probability(
-                    S_t=spot_price,
+                    S_t=pricing_spot,
                     K=self.strike_price,
                     tau_seconds=time_remaining_sec,
                     annualized_vol=vol_ann,
                     ofi_normalized=ofi,
-                    momentum_normalized=norm_momentum
+                    momentum_normalized=norm_momentum,
+                    known_avg_price=known_avg_price,
+                    twap_window_sec=TWAP_SETTLEMENT_WINDOW_SEC
+                )
+
+                # Proposal 1: shadow/counterfactual logging. Recompute fair probability using
+                # ONLY the pre-upgrade inputs -- plain mid instead of microprice, plain trailing
+                # realized vol instead of the DVOL blend, and known_avg_price=None to disable the
+                # TWAP/Asian-option variance adjustment -- so calibration_log.csv carries both the
+                # live model's prediction and what the bot would have priced before any of the 4
+                # upgrades shipped this session. Once enough windows have settled, comparing Brier
+                # score / log-loss of p_model vs p_model_shadow empirically proves or disproves
+                # whether these upgrades actually improved calibration, rather than assuming it.
+                p_model_shadow, _z_shadow = self.strategy.calculate_fair_probability(
+                    S_t=spot_price,
+                    K=self.strike_price,
+                    tau_seconds=time_remaining_sec,
+                    annualized_vol=raw_vol_ann,
+                    ofi_normalized=ofi,
+                    momentum_normalized=norm_momentum,
+                    known_avg_price=None,
+                    twap_window_sec=TWAP_SETTLEMENT_WINDOW_SEC
                 )
 
                 calibrated_p_up = self.calibrator.calibrate(raw_p_model)
@@ -381,7 +603,8 @@ class Polymarket5mBot:
                     ofi=ofi,
                     z=z,
                     p_model=raw_p_model,
-                    p_market=live_quotes["yes_ask"]
+                    p_market=live_quotes["yes_ask"],
+                    p_model_shadow=p_model_shadow
                 )
 
                 market_info = {
@@ -393,10 +616,12 @@ class Polymarket5mBot:
                     "yes_bid": live_quotes["yes_bid"],
                     "no_ask": live_quotes["no_ask"],
                     "no_bid": live_quotes["no_bid"],
+                    "known_avg_price": known_avg_price,
+                    "twap_window_sec": TWAP_SETTLEMENT_WINDOW_SEC,
                 }
 
                 signal = self.strategy.evaluate(
-                    spot_price=spot_price,
+                    spot_price=pricing_spot,
                     momentum=momentum,
                     market_info=market_info,
                     order_book={}
@@ -459,9 +684,13 @@ class Polymarket5mBot:
                         exec_price = direct_ask
                         real_edge = signal["estimated_prob"] - exec_price
                         direct_spread = (direct_ask - direct_bid) if (direct_bid is not None and direct_ask >= direct_bid) else 0.02
+                        # Fee-aware hurdle using the REAL Polymarket crypto taker-fee curve
+                        # (rate * (1 - price), peaks at 3.5% near 50/50) rather than the old
+                        # flat 0.5% assumption -- see estimate_taker_fee_fraction() for the
+                        # live-verified fee schedule this is based on.
                         direct_hurdle = max(
                             self.strategy.min_edge,
-                            (direct_spread / 2.0) + self.strategy.taker_fee + self.strategy.slippage_buffer
+                            (direct_spread / 2.0) + estimate_taker_fee_fraction(exec_price) + self.strategy.slippage_buffer
                         )
 
                         if real_edge <= direct_hurdle:
@@ -513,31 +742,85 @@ class Polymarket5mBot:
                             )
 
                             if size > 0:
-                                token_target = self.market_feed.token_id_yes if is_yes else (self.market_feed.token_id_no or "token_no")
-                                active_slug = self.market_feed.get_slug_for_window(self.current_window_start)
-                                await self.executor.execute_trade(
-                                    window_id=self.current_window_id,
-                                    slug=active_slug,
-                                    token_id=token_target or "clob_token_default",
-                                    outcome=signal["outcome"],
-                                    amount_usd=size,
-                                    price=exec_price
-                                )
-                                self.last_trade_time = now
+                                # Proposal 3: Order-Book Depth & Realistic Book Walking
+                                # Walk the direct ask order book to obtain the true VWAP fill price across depth
+                                target_asks = live_quotes.get("yes_asks" if is_yes else "no_asks", [])
+                                vwap_price, total_cost, total_shares = self.market_feed.simulate_walk_book(target_asks, size)
 
-                                self.event_logger.log_event(
-                                    window_id=self.current_window_id,
-                                    tau_sec=time_remaining_sec,
-                                    outcome=signal["outcome"],
-                                    z=z,
-                                    p_model=signal["estimated_prob"],
-                                    direct_ask=exec_price,
-                                    direct_spread=direct_spread,
-                                    real_edge=real_edge,
-                                    hurdle=direct_hurdle,
-                                    status="EXECUTED",
-                                    size_usd=size
-                                )
+                                if vwap_price is None:
+                                    # Book lacks depth to fill requested size; avoid phantom fills.
+                                    # NOTE: deliberately no `continue` here -- this sits inside the main
+                                    # 1s tick loop, and a bare `continue` would skip straight back to
+                                    # `while True`, silently swallowing the periodic status-line /
+                                    # ETH-SOL-DVOL telemetry block below for that tick. That's exactly
+                                    # the wrong failure mode: thin resting depth (which triggers this
+                                    # branch) is precisely when that telemetry is most useful to see.
+                                    # Verified live: a bare `continue` here made the status line vanish
+                                    # for stretches whenever signals kept hitting BLOCKED_PHANTOM/HURDLE.
+                                    self.event_logger.log_event(
+                                        window_id=self.current_window_id,
+                                        tau_sec=time_remaining_sec,
+                                        outcome=signal["outcome"],
+                                        z=z,
+                                        p_model=signal["estimated_prob"],
+                                        direct_ask=exec_price,
+                                        direct_spread=direct_spread,
+                                        real_edge=real_edge,
+                                        hurdle=direct_hurdle,
+                                        status="BLOCKED_PHANTOM",
+                                        size_usd=0.0
+                                    )
+                                else:
+                                    # Re-verify edge against VWAP fill price after slippage.
+                                    # Recompute the fee-aware hurdle at the ACTUAL vwap fill
+                                    # price too -- walking deeper into the book to fill size
+                                    # can land at a materially different price than direct_ask,
+                                    # and the real taker fee (rate * (1-price)) moves with it.
+                                    vwap_edge = signal["estimated_prob"] - vwap_price
+                                    vwap_hurdle = max(
+                                        self.strategy.min_edge,
+                                        (direct_spread / 2.0) + estimate_taker_fee_fraction(vwap_price) + self.strategy.slippage_buffer
+                                    )
+                                    if vwap_edge <= vwap_hurdle:
+                                        self.event_logger.log_event(
+                                            window_id=self.current_window_id,
+                                            tau_sec=time_remaining_sec,
+                                            outcome=signal["outcome"],
+                                            z=z,
+                                            p_model=signal["estimated_prob"],
+                                            direct_ask=vwap_price,
+                                            direct_spread=direct_spread,
+                                            real_edge=vwap_edge,
+                                            hurdle=vwap_hurdle,
+                                            status="BLOCKED_HURDLE",
+                                            size_usd=0.0
+                                        )
+                                    else:
+                                        token_target = self.market_feed.token_id_yes if is_yes else (self.market_feed.token_id_no or "token_no")
+                                        active_slug = self.market_feed.get_slug_for_window(self.current_window_start)
+                                        await self.executor.execute_trade(
+                                            window_id=self.current_window_id,
+                                            slug=active_slug,
+                                            token_id=token_target or "clob_token_default",
+                                            outcome=signal["outcome"],
+                                            amount_usd=size,
+                                            price=vwap_price
+                                        )
+                                        self.last_trade_time = now
+
+                                        self.event_logger.log_event(
+                                            window_id=self.current_window_id,
+                                            tau_sec=time_remaining_sec,
+                                            outcome=signal["outcome"],
+                                            z=z,
+                                            p_model=signal["estimated_prob"],
+                                            direct_ask=vwap_price,
+                                            direct_spread=direct_spread,
+                                            real_edge=vwap_edge,
+                                            hurdle=vwap_hurdle,
+                                            status="EXECUTED",
+                                            size_usd=size
+                                        )
                             else:
                                 self.event_logger.log_event(
                                     window_id=self.current_window_id,
@@ -559,11 +842,19 @@ class Polymarket5mBot:
                     dir_n = f"{live_quotes['direct_no_ask']:.2f}" if live_quotes['direct_no_ask'] else "None"
                     pending_count = len(self.pending_resolutions)
                     can_trade_now = self.risk_manager.can_trade()
-                    status_str = "ACTIVE" if can_trade_now else "HALTED (RISK)"
+                    status_str = "ACTIVE" if can_trade_now else "HALTED"
+                    basis_str = f"Basis: {basis_spread:+.2f}" if basis_spread is not None else "Basis: N/A"
+                    dvol_str = f"DVOL: {dvol_ann*100:.1f}%" if dvol_ann is not None else "DVOL: N/A"
+                    eth_state = self.multi_asset_feed.get_market_state("eth")
+                    sol_state = self.multi_asset_feed.get_market_state("sol")
+                    eth_p = f"{eth_state['p_implied']:.2f}" if eth_state.get("p_implied") is not None else "N/A"
+                    sol_p = f"{sol_state['p_implied']:.2f}" if sol_state.get("p_implied") is not None else "N/A"
+                    multi_str = f"ETH(P): {eth_p} | SOL(P): {sol_p}"
+
                     logger.info(
                         f"Spot: ${spot_price:.2f} | K: ${self.strike_price:.2f} | "
-                        f"Tau: {time_remaining_sec:.0f}s | Vol: {vol_ann*100:.1f}% | "
-                        f"OFI: {ofi:+.2f} | z: {z:+.2f} | P(up): {calibrated_p_up*100:.1f}% | "
+                        f"Tau: {time_remaining_sec:.0f}s | Vol: {vol_ann*100:.1f}% ({dvol_str}) | "
+                        f"{basis_str} | {multi_str} | OFI: {ofi:+.2f} | z: {z:+.2f} | P(up): {calibrated_p_up*100:.1f}% | "
                         f"Trade: [{status_str}] | Cash: ${self.executor.simulated_balance:.2f} | Day PnL: {self.risk_manager.daily_pnl:+.2f} USD | Pending Res: {pending_count}"
                     )
 
@@ -571,5 +862,9 @@ class Polymarket5mBot:
             logger.info("Bot shutting down...")
         finally:
             self.spot_feed.stop()
+            await self.deribit_feed.stop()
+            await self.multi_asset_feed.stop()
             spot_task.cancel()
+            deribit_task.cancel()
+            multi_asset_task.cancel()
             await self.market_feed.close()

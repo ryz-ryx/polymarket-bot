@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
+from src.strategies.claud_quant import estimate_taker_fee_fraction
 
 CALIB_LOG = "data/calibration_log.csv"
 EVENT_LOG = "data/trade_events.csv"
@@ -96,6 +97,75 @@ def analyze_calibration(calib_path=CALIB_LOG, event_path=EVENT_LOG, min_windows=
             print(f"\nAll {num_windows} windows had identical outcome ({window_df['realized_up'].iloc[0]}). Skipping isotonic fit.")
     else:
         print(f"\nDeferred Isotonic Fit: Need >= {min_windows} distinct windows (currently {num_windows} distinct windows).")
+
+    # -------------------------------------------------------------
+    # 4. FEE-ADJUSTED TRADE PROFITABILITY (the actual go-live gate)
+    # -------------------------------------------------------------
+    # Joins EXECUTED rows in trade_events.csv to their settled outcome in calibration_log.csv
+    # and applies Polymarket's REAL crypto_fees_v2 taker fee (rate * (1-price), takerOnly --
+    # see estimate_taker_fee_fraction()) rather than reporting gross/fee-free numbers. Paper
+    # trading's own P&L now deducts this fee at execution too (src/executor.py), but this
+    # section lets you re-derive the same figure independently from the raw logs, and is what
+    # "profit factor" should mean when deciding whether to go live with real capital.
+    print("\n--- Fee-Adjusted Trade Profitability (EXECUTED trades joined to settlements) ---")
+    if not os.path.exists(event_path):
+        print("No trade_events.csv found -- cannot reconstruct trade-level PnL.")
+        return
+
+    edf_full = pd.read_csv(event_path)
+    exec_df = edf_full[edf_full["status"] == "EXECUTED"].copy()
+    if exec_df.empty:
+        print("No EXECUTED trades logged yet.")
+        return
+
+    realized_map = settled.drop_duplicates("window_id", keep="last").set_index("window_id")["realized_up"].to_dict()
+
+    matched = 0
+    unmatched = 0
+    wins = 0
+    losses = 0
+    gross_pnl = 0.0
+    total_fees = 0.0
+    net_pnl = 0.0
+    gross_win_net_of_fee = 0.0
+    gross_loss_net_of_fee = 0.0
+
+    for _, row in exec_df.iterrows():
+        wid = row["window_id"]
+        price = row.get("direct_ask")
+        size = row.get("size_usd")
+        side = row.get("outcome")
+        if wid not in realized_map or pd.isna(price) or pd.isna(size) or size <= 0:
+            unmatched += 1
+            continue
+        realized_up = int(realized_map[wid])
+        is_win = (side == "YES" and realized_up == 1) or (side == "NO" and realized_up == 0)
+        shares = size / max(price, 0.01)
+        pnl_gross = (shares * 1.0 - size) if is_win else -size
+        fee = size * estimate_taker_fee_fraction(price)
+        pnl_net = pnl_gross - fee
+
+        matched += 1
+        gross_pnl += pnl_gross
+        total_fees += fee
+        net_pnl += pnl_net
+        if pnl_net > 0:
+            wins += 1
+            gross_win_net_of_fee += pnl_net
+        else:
+            losses += 1
+            gross_loss_net_of_fee += -pnl_net
+
+    print(f"Matched trades: {matched}  (Unmatched/unresolved: {unmatched})")
+    if matched > 0:
+        profit_factor = (gross_win_net_of_fee / gross_loss_net_of_fee) if gross_loss_net_of_fee > 0 else float("inf")
+        print(f"Wins/Losses (net of fee): {wins}/{losses}  Win rate: {wins/matched*100:.1f}%")
+        print(f"Gross PnL (fee-free, misleading): ${gross_pnl:+.2f}")
+        print(f"Total real taker fees: ${total_fees:.2f}")
+        print(f"Net PnL (fee-adjusted, the number that matters): ${net_pnl:+.2f}")
+        print(f"Profit Factor (net-of-fee gross-win / gross-loss): {profit_factor:.3f}")
+        gate = "PASS" if (num_windows >= min_windows and profit_factor > 1.20) else "NOT YET"
+        print(f"\nGo-live gate (>= {min_windows} settled windows AND net-of-fee profit factor > 1.20): {gate}")
 
 if __name__ == "__main__":
     analyze_calibration()

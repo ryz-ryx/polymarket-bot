@@ -21,6 +21,14 @@ class SpotFeed:
         self.latest_price: Optional[float] = None
         self.best_bid: Optional[float] = None
         self.best_ask: Optional[float] = None
+        self.best_bid_qty: Optional[float] = None
+        self.best_ask_qty: Optional[float] = None
+        # Stoikov microprice: size-weighted mid that leans toward whichever side has LESS
+        # resting size (the side more likely to get run through next tick). Used only for
+        # the strategy's pricing input (S_t) -- realized vol, momentum, TWAP settlement
+        # estimation, and window bookkeeping all intentionally keep using the plain mid,
+        # since microprice is a short-horizon directional signal, not a "true price" proxy.
+        self.microprice: Optional[float] = None
         self.latest_timestamp: float = 0.0
         
         self.second_buckets: Deque[tuple[int, float]] = deque(maxlen=60)
@@ -72,10 +80,20 @@ class SpotFeed:
                         if "bookTicker" in stream:
                             self.best_bid = float(data["b"])
                             self.best_ask = float(data["a"])
+                            self.best_bid_qty = float(data.get("B", 0.0))
+                            self.best_ask_qty = float(data.get("A", 0.0))
                             mid_price = (self.best_bid + self.best_ask) / 2.0
                             ts = time.time()
                             self.latest_price = mid_price
                             self.latest_timestamp = ts
+
+                            total_qty = self.best_bid_qty + self.best_ask_qty
+                            if total_qty > 1e-9:
+                                self.microprice = (
+                                    (self.best_bid * self.best_ask_qty) + (self.best_ask * self.best_bid_qty)
+                                ) / total_qty
+                            else:
+                                self.microprice = mid_price
 
                             current_sec = int(ts)
                             if current_sec > self.last_bucket_second:

@@ -42,8 +42,45 @@ class EmpiricalCalibrator:
                 writer = csv.writer(f)
                 writer.writerow([
                     "timestamp", "window_id", "tau_sec", "moneyness", "vol_annualized",
-                    "ofi", "z", "p_model", "p_market", "realized_up"
+                    "ofi", "z", "p_model", "p_model_shadow", "p_market", "realized_up"
                 ])
+        else:
+            self._migrate_add_shadow_column()
+
+    def _migrate_add_shadow_column(self):
+        """
+        Proposal 1 (shadow/counterfactual logging): adds the p_model_shadow column to an
+        already-existing calibration_log.csv that predates it, so every row keeps a
+        consistent column count going forward. Existing rows get p_model_shadow=""
+        (unknown -- the shadow model wasn't computed for them), which
+        fit_calibration_curve/correct_window_outcome safely ignore since neither of them
+        reference this column.
+        """
+        try:
+            with open(self.log_path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+            if not rows:
+                return
+            header = rows[0]
+            if "p_model_shadow" in header:
+                return
+            p_model_idx = header.index("p_model") if "p_model" in header else len(header) - 2
+            new_header = header[:p_model_idx + 1] + ["p_model_shadow"] + header[p_model_idx + 1:]
+            new_rows = [new_header]
+            for row in rows[1:]:
+                if not row:
+                    continue
+                new_rows.append(row[:p_model_idx + 1] + [""] + row[p_model_idx + 1:])
+            with open(self.log_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerows(new_rows)
+            logger.info(
+                f"Calibrator: Migrated calibration_log.csv to include p_model_shadow column "
+                f"({len(new_rows) - 1} existing rows backfilled with empty shadow value)."
+            )
+        except Exception as e:
+            logger.error(f"Failed to migrate calibration_log.csv for p_model_shadow column: {e}")
 
     def _load_pending_observations(self):
         if os.path.exists(self.observations_path):
@@ -75,7 +112,8 @@ class EmpiricalCalibrator:
         ofi: float,
         z: float,
         p_model: float,
-        p_market: float
+        p_market: float,
+        p_model_shadow: Optional[float] = None
     ):
         obs = {
             "timestamp": time.time(),
@@ -86,6 +124,7 @@ class EmpiricalCalibrator:
             "ofi": round(ofi, 4),
             "z": round(z, 4),
             "p_model": round(p_model, 4),
+            "p_model_shadow": round(p_model_shadow, 4) if p_model_shadow is not None else "",
             "p_market": round(p_market, 4),
         }
         self.pending_window_observations.append(obs)
@@ -116,6 +155,7 @@ class EmpiricalCalibrator:
                         o["ofi"],
                         o["z"],
                         o["p_model"],
+                        o.get("p_model_shadow", ""),
                         o["p_market"],
                         realized_up
                     ])

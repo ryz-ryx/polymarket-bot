@@ -77,7 +77,49 @@ class PolymarketFeed:
 
         return self.current_market
 
-    async def _fetch_single_book(self, token_id: str) -> Tuple[Optional[float], Optional[float]]:
+    @staticmethod
+    def simulate_walk_book(asks: List[Dict[str, float]], required_usd: float) -> Tuple[Optional[float], float, float]:
+        """
+        Simulates walking through an ask orderbook ladder for a given USD spend.
+        Asks are expected to be a list of {'price': float, 'size': float}, sorted by price ascending.
+
+        Returns:
+            (vwap_price, total_filled_usd, total_shares)
+            If available depth < required_usd, returns (None, total_filled_usd, total_shares).
+        """
+        if not asks or required_usd <= 0:
+            return None, 0.0, 0.0
+
+        remaining_usd = required_usd
+        total_shares = 0.0
+        total_cost = 0.0
+
+        for level in sorted(asks, key=lambda x: x["price"]):
+            price = level["price"]
+            size = level["size"]  # available shares at this price level
+            if price <= 0 or size <= 0:
+                continue
+
+            level_max_cost = price * size
+            if remaining_usd <= level_max_cost:
+                shares_bought = remaining_usd / price
+                total_shares += shares_bought
+                total_cost += remaining_usd
+                remaining_usd = 0.0
+                break
+            else:
+                total_shares += size
+                total_cost += level_max_cost
+                remaining_usd -= level_max_cost
+
+        if remaining_usd > 1e-4:
+            # Not enough liquidity to fill the requested size
+            return None, total_cost, total_shares
+
+        vwap = total_cost / total_shares if total_shares > 0 else None
+        return vwap, total_cost, total_shares
+
+    async def _fetch_single_book(self, token_id: str) -> Tuple[Optional[float], Optional[float], List[Dict[str, float]], List[Dict[str, float]]]:
         session = await self.get_session()
         try:
             url = f"{self.CLOB_API}/book?token_id={token_id}"
@@ -87,12 +129,15 @@ class PolymarketFeed:
                     raw_bids = data.get("bids", [])
                     raw_asks = data.get("asks", [])
                     
-                    best_bid = sorted([float(b["price"]) for b in raw_bids], reverse=True)[0] if raw_bids else None
-                    best_ask = sorted([float(a["price"]) for a in raw_asks])[0] if raw_asks else None
-                    return best_bid, best_ask
+                    parsed_bids = [{"price": float(b["price"]), "size": float(b["size"])} for b in raw_bids if "price" in b and "size" in b]
+                    parsed_asks = [{"price": float(a["price"]), "size": float(a["size"])} for a in raw_asks if "price" in a and "size" in a]
+
+                    best_bid = sorted([b["price"] for b in parsed_bids], reverse=True)[0] if parsed_bids else None
+                    best_ask = sorted([a["price"] for a in parsed_asks])[0] if parsed_asks else None
+                    return best_bid, best_ask, parsed_bids, parsed_asks
         except Exception as e:
             logger.debug(f"Error fetching book for token {token_id}: {e}")
-        return None, None
+        return None, None, [], []
 
     async def get_live_market_prices(self) -> Dict[str, Any]:
         prices = {
@@ -100,6 +145,10 @@ class PolymarketFeed:
             "direct_yes_ask": None,
             "direct_no_bid": None,
             "direct_no_ask": None,
+            "yes_asks": [],
+            "yes_bids": [],
+            "no_asks": [],
+            "no_bids": [],
             "yes_bid": 0.49,
             "yes_ask": 0.51,
             "no_bid": 0.49,
@@ -110,7 +159,7 @@ class PolymarketFeed:
         if not self.token_id_yes or not self.token_id_no:
             return prices
 
-        (yes_bid, yes_ask), (no_bid, no_ask) = await asyncio.gather(
+        (yes_bid, yes_ask, yes_bids, yes_asks), (no_bid, no_ask, no_bids, no_asks) = await asyncio.gather(
             self._fetch_single_book(self.token_id_yes),
             self._fetch_single_book(self.token_id_no)
         )
@@ -119,6 +168,10 @@ class PolymarketFeed:
         prices["direct_yes_ask"] = yes_ask
         prices["direct_no_bid"] = no_bid
         prices["direct_no_ask"] = no_ask
+        prices["yes_asks"] = yes_asks
+        prices["yes_bids"] = yes_bids
+        prices["no_asks"] = no_asks
+        prices["no_bids"] = no_bids
 
         candidates_yes_bid: List[float] = []
         candidates_yes_ask: List[float] = []

@@ -1,0 +1,79 @@
+name: Run Polymarket 5m Bot (Paper Trading)
+
+# Runs the bot in ~5h50m chunks so it can operate without a local machine.
+# State (data/*.json, data/*.csv) is NOT stored on main -- it's persisted across
+# runs on a separate `bot-state` branch, restored at the start of each run and
+# committed back at the end (even on crash/timeout, via `if: always()`). The
+# bot's own persistence layer (positions/pending-resolutions/tick-buffers all
+# save to disk on every mutation, not just at shutdown) is exactly what makes
+# an abrupt `timeout`-triggered kill safe here -- this is the same resilience
+# the bot has relied on all along for manual restarts.
+#
+# concurrency + cancel-in-progress:false guarantees the next scheduled run
+# waits for the current one to fully finish before starting, so two instances
+# never write to the same state files at once.
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: polymarket-bot-run
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout source (main)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Restore persisted bot state from bot-state branch
+        run: |
+          mkdir -p data
+          if git ls-remote --exit-code --heads origin bot-state >/dev/null 2>&1; then
+            git fetch origin bot-state
+            git checkout origin/bot-state -- data/ && echo "Restored data/ from bot-state branch." || echo "bot-state branch exists but has no data/ yet -- starting fresh."
+          else
+            echo "bot-state branch does not exist yet -- starting fresh (expected on first run before seeding)."
+          fi
+          ls -la data/ || true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot for up to 5h50m (paper trading only -- hardcoded, not overridable by any committed .env)
+        env:
+          PAPER_TRADING: "true"
+        run: |
+          timeout 21000 python run.py
+          echo "Bot process ended (timeout reached or exited on its own) with exit code $?."
+
+      - name: Persist updated state to bot-state branch
+        if: always()
+        run: |
+          git config user.name "polymarket-bot-ci"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch origin bot-state || true
+          if git show-ref --verify --quiet refs/remotes/origin/bot-state; then
+            git checkout -B bot-state origin/bot-state
+          else
+            git checkout --orphan bot-state
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+          mkdir -p data
+          git add -f data/
+          git commit -m "Bot state update $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "No state changes to commit."
+          git push origin bot-state
