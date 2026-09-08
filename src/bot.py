@@ -139,7 +139,7 @@ class Polymarket5mBot:
             try:
                 outcome = await self.market_feed.get_market_resolution(slug)
             except Exception as e:
-                logger.debug(f"Resolution poll notice for {slug}: {e}")
+                logger.warning(f"Resolution poll notice for {slug}: {type(e).__name__}: {e}")
                 outcome = None
             
             if outcome is not None:
@@ -340,7 +340,7 @@ class Polymarket5mBot:
             try:
                 outcome = await self.market_feed.get_market_resolution(slug)
             except Exception as e:
-                logger.debug(f"Reconciliation poll notice for {slug}: {e}")
+                logger.warning(f"Reconciliation poll notice for {slug}: {type(e).__name__}: {e}")
                 outcome = None
 
             if outcome is None:

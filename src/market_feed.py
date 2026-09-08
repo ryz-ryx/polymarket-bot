@@ -210,7 +210,7 @@ class PolymarketFeed:
         session = await self.get_session()
         url = f"{self.GAMMA_API}/events?slug={slug}"
         try:
-            async with session.get(url, timeout=4) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status == 200:
                     events = await resp.json()
                     if events and isinstance(events, list):
@@ -237,8 +237,11 @@ class PolymarketFeed:
                                         return 0
                                 except (ValueError, TypeError):
                                     pass
+                else:
+                    body = await resp.text()
+                    logger.warning(f"get_market_resolution: HTTP {resp.status} for {slug}: {body[:200]}")
         except Exception as e:
-            logger.debug(f"Error checking resolution for {slug}: {e}")
+            logger.warning(f"get_market_resolution: {type(e).__name__} for {slug}: {e}")
         return None
 
     async def close(self):
