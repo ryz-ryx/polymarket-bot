@@ -5,7 +5,59 @@ import csv
 import glob
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
+
+ASSET_SUFFIX = {"BTC": "", "ETH": "_eth", "SOL": "_sol"}
+
+
+def _safe_float(v, default=0.0):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def tail_read_csv_rows(filepath, tail_bytes):
+    """Read the last `tail_bytes` of a growing CSV log and parse it against the
+    file's own header line, without loading the whole (potentially many-MB,
+    ever-growing) file into memory on every request."""
+    if not os.path.exists(filepath):
+        return []
+    with open(filepath, "rb") as f:
+        header_line = f.readline().decode("utf-8", errors="replace").strip()
+        header_len = f.tell()
+        size = os.fstat(f.fileno()).st_size
+        if size - header_len <= tail_bytes:
+            f.seek(header_len)
+        else:
+            f.seek(size - tail_bytes)
+        data = f.read()
+    text = data.decode("utf-8", errors="replace")
+    lines = text.split("\n")
+    if len(lines) > 1:
+        lines = lines[1:]  # drop a possibly-truncated leading partial line
+    reader = csv.DictReader([header_line] + [l for l in lines if l.strip()])
+    return list(reader)
+
+
+def read_rows_covering_window(filepath, since_seconds, max_bytes_cap=32_000_000):
+    """Grow the tail read until every row within the last `since_seconds` is
+    captured (or the whole file / a size cap is hit). Returns
+    (rows_in_window_oldest_first, fully_covered: bool)."""
+    if not os.path.exists(filepath):
+        return [], True
+    full_size = os.path.getsize(filepath)
+    cutoff = time.time() - since_seconds
+    tail_bytes = min(1_000_000, full_size) or 1_000_000
+    while True:
+        rows = tail_read_csv_rows(filepath, tail_bytes)
+        oldest_ts = _safe_float(rows[0].get("timestamp")) if rows else None
+        covered_whole = tail_bytes >= full_size
+        window_fully_covered = covered_whole or (oldest_ts is not None and oldest_ts <= cutoff)
+        if window_fully_covered or tail_bytes >= max_bytes_cap:
+            windowed = [r for r in rows if _safe_float(r.get("timestamp")) >= cutoff]
+            return windowed, window_fully_covered
+        tail_bytes *= 4
 
 PORT = int(os.getenv("PORT", "5000"))
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -92,6 +144,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.serve_api_state()
             elif path == "/healthz":
                 self.serve_healthz()
+            elif path == "/api/drawdown":
+                self.serve_api_drawdown()
+            elif path == "/api/recent_trades":
+                self.serve_api_recent_trades(parse_qs(parsed.query))
+            elif path == "/api/funnel":
+                self.serve_api_funnel(parse_qs(parsed.query))
+            elif path == "/api/calibration":
+                self.serve_api_calibration(parse_qs(parsed.query))
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -169,6 +229,155 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_json(self, payload, status=200):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_api_drawdown(self):
+        # Phase-1 permanent portfolio drawdown breaker (src/bot.py). Unlike the
+        # daily circuit breakers, this file only exists once the breaker has
+        # tripped -- absence means healthy, not "unknown".
+        fp = os.path.join(BASE_DIR, "data", "risk_state_drawdown.json")
+        data = read_json_file(fp)
+        if data is None:
+            self._send_json({"tripped": False, "file_exists": False, "note": "Breaker has never tripped."})
+            return
+        self._send_json({
+            "tripped": bool(data.get("circuit_breaker_triggered", False)),
+            "file_exists": True,
+            "starting_balance_usd": data.get("starting_balance_usd"),
+            "drawdown_floor_usd": data.get("drawdown_floor_usd"),
+            "current_simulated_balance": data.get("current_simulated_balance"),
+            "updated_at": data.get("updated_at"),
+        })
+
+    def serve_api_recent_trades(self, query):
+        asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
+        if asset not in ASSET_SUFFIX:
+            self._send_json({"error": f"unknown asset '{asset}', expected BTC/ETH/SOL"}, status=400)
+            return
+        status_filter = query.get("status", ["EXECUTED"])[0]
+        limit = min(max(int(_safe_float(query.get("limit", ["20"])[0], 20)), 1), 200)
+        fp = os.path.join(BASE_DIR, "data", f"trade_events{ASSET_SUFFIX[asset]}.csv")
+
+        # Grow the tail read until `limit` matching rows are found or the
+        # whole file has been scanned -- EXECUTED rows are a small fraction
+        # of all funnel events, so a small fixed tail often isn't enough.
+        tail_bytes = 1_000_000
+        full_size = os.path.getsize(fp) if os.path.exists(fp) else 0
+        matched = []
+        fully_scanned = full_size == 0
+        while True:
+            rows = tail_read_csv_rows(fp, tail_bytes)
+            matched = [r for r in rows if (status_filter == "" or r.get("status") == status_filter)]
+            fully_scanned = tail_bytes >= full_size
+            if len(matched) >= limit or fully_scanned or tail_bytes >= 32_000_000:
+                break
+            tail_bytes *= 4
+
+        recent = matched[-limit:]
+        trades = [{
+            "timestamp": _safe_float(r.get("timestamp")),
+            "outcome": r.get("outcome"),
+            "entry_price": _safe_float(r.get("direct_ask")),
+            "size_usd": _safe_float(r.get("size_usd")),
+            "status": r.get("status"),
+        } for r in recent]
+
+        self._send_json({
+            "asset": asset,
+            "status_filter": status_filter,
+            "count": len(trades),
+            "requested_limit": limit,
+            "fully_scanned_available_history": fully_scanned,
+            "trades": trades,
+        })
+
+    def serve_api_funnel(self, query):
+        asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
+        if asset not in ASSET_SUFFIX:
+            self._send_json({"error": f"unknown asset '{asset}', expected BTC/ETH/SOL"}, status=400)
+            return
+        window_hours = _safe_float(query.get("window_hours", ["4"])[0], 4.0)
+        baseline_hours = _safe_float(query.get("baseline_hours", ["96"])[0], 96.0)
+        fp = os.path.join(BASE_DIR, "data", f"trade_events{ASSET_SUFFIX[asset]}.csv")
+
+        def counts_for(hours):
+            rows, covered = read_rows_covering_window(fp, hours * 3600)
+            c = {}
+            for r in rows:
+                s = r.get("status", "UNKNOWN")
+                c[s] = c.get(s, 0) + 1
+            return c, len(rows), covered
+
+        window_counts, window_total, window_covered = counts_for(window_hours)
+        baseline_counts, baseline_total, baseline_covered = counts_for(baseline_hours)
+
+        def phantom_rate(counts, total):
+            return (counts.get("BLOCKED_PHANTOM", 0) / total) if total else 0.0
+
+        self._send_json({
+            "asset": asset,
+            "window_hours": window_hours,
+            "window_counts": window_counts,
+            "window_total_events": window_total,
+            "window_phantom_rate": round(phantom_rate(window_counts, window_total), 4),
+            "window_fully_covered": window_covered,
+            "baseline_hours": baseline_hours,
+            "baseline_counts": baseline_counts,
+            "baseline_total_events": baseline_total,
+            "baseline_phantom_rate": round(phantom_rate(baseline_counts, baseline_total), 4),
+            "baseline_fully_covered": baseline_covered,
+        })
+
+    def serve_api_calibration(self, query):
+        asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
+        if asset not in ASSET_SUFFIX:
+            self._send_json({"error": f"unknown asset '{asset}', expected BTC/ETH/SOL"}, status=400)
+            return
+        days = _safe_float(query.get("days", ["7"])[0], 7.0)
+        fp = os.path.join(BASE_DIR, "data", f"calibration_log{ASSET_SUFFIX[asset]}.csv")
+
+        rows, covered = read_rows_covering_window(fp, days * 86400)
+
+        # Dedupe to one row per window_id, picking the sample closest to
+        # tau_sec == 150 (mirrors dashboard's get_asset_confidence_weight),
+        # then score only resolved windows (realized_up in {0,1}).
+        window_groups = {}
+        for r in rows:
+            if r.get("realized_up") not in ("0", "1"):
+                continue
+            wid = r.get("window_id")
+            window_groups.setdefault(wid, []).append(r)
+
+        model_sq_err, market_sq_err = [], []
+        for wid, wrows in window_groups.items():
+            try:
+                best = min(wrows, key=lambda r: abs(_safe_float(r.get("tau_sec"), 999) - 150.0))
+                y = int(best["realized_up"])
+                model_sq_err.append((_safe_float(best.get("p_model")) - y) ** 2)
+                market_sq_err.append((_safe_float(best.get("p_market")) - y) ** 2)
+            except Exception:
+                continue
+
+        model_brier = (sum(model_sq_err) / len(model_sq_err)) if model_sq_err else None
+        market_brier = (sum(market_sq_err) / len(market_sq_err)) if market_sq_err else None
+
+        self._send_json({
+            "asset": asset,
+            "days": days,
+            "resolved_windows": len(model_sq_err),
+            "model_brier": round(model_brier, 4) if model_brier is not None else None,
+            "market_brier": round(market_brier, 4) if market_brier is not None else None,
+            "model_better_than_market": (model_brier < market_brier) if (model_brier is not None and market_brier is not None) else None,
+            "window_fully_covered": covered,
+        })
 
     def serve_healthz(self):
         now = time.time()
