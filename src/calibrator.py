@@ -47,11 +47,42 @@ class EmpiricalCalibrator:
                 writer = csv.writer(f)
                 writer.writerow([
                     "timestamp", "window_id", "tau_sec", "moneyness", "vol_annualized",
-                    "ofi", "cbi", "z", "p_model", "p_model_shadow", "p_market", "realized_up"
+                    "ofi", "cbi", "z", "p_model", "p_model_shadow", "p_market", "realized_up",
+                    "spot_lead_lag", "twap_dev", "book_depth_skew"
                 ])
         else:
             self._migrate_add_shadow_column()
             self._migrate_add_cbi_column()
+            self._migrate_add_edge_research_columns()
+
+    def _migrate_add_edge_research_columns(self):
+        """
+        Adds spot_lead_lag, twap_dev, and book_depth_skew shadow columns to calibration_log.csv if missing.
+        """
+        try:
+            with open(self.log_path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+            if not rows:
+                return
+            header = rows[0]
+            if "spot_lead_lag" in header:
+                return
+            new_header = header + ["spot_lead_lag", "twap_dev", "book_depth_skew"]
+            new_rows = [new_header]
+            for row in rows[1:]:
+                if not row:
+                    continue
+                new_rows.append(row + ["", "", ""])
+            with open(self.log_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerows(new_rows)
+            logger.info(
+                f"Calibrator: Migrated calibration_log.csv to include edge research columns "
+                f"({len(new_rows) - 1} existing rows backfilled)."
+            )
+        except Exception as e:
+            logger.error(f"Failed to migrate calibration_log.csv for edge research columns: {e}")
 
     def _migrate_add_shadow_column(self):
         """
@@ -150,7 +181,10 @@ class EmpiricalCalibrator:
         p_model: float,
         p_market: float,
         p_model_shadow: Optional[float] = None,
-        cbi: float = 0.0
+        cbi: float = 0.0,
+        spot_lead_lag: float = 0.0,
+        twap_dev: float = 0.0,
+        book_depth_skew: float = 0.0
     ):
         obs = {
             "timestamp": time.time(),
@@ -164,6 +198,9 @@ class EmpiricalCalibrator:
             "p_model": round(p_model, 4),
             "p_model_shadow": round(p_model_shadow, 4) if p_model_shadow is not None else "",
             "p_market": round(p_market, 4),
+            "spot_lead_lag": round(spot_lead_lag, 6),
+            "twap_dev": round(twap_dev, 6),
+            "book_depth_skew": round(book_depth_skew, 4)
         }
         self.pending_window_observations.append(obs)
         now = time.time()
@@ -199,7 +236,10 @@ class EmpiricalCalibrator:
                         o["p_model"],
                         o.get("p_model_shadow", ""),
                         o["p_market"],
-                        realized_up
+                        realized_up,
+                        o.get("spot_lead_lag", 0.0),
+                        o.get("twap_dev", 0.0),
+                        o.get("book_depth_skew", 0.0)
                     ])
             logger.info(f"Calibrator: Flushed {len(matching)} observations for window {window_id} (Outcome: {'UP (1)' if realized_up else 'DOWN (0)'})")
         except Exception as e:

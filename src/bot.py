@@ -636,6 +636,26 @@ class AssetTradingEngine:
 
         calibrated_p_up = self.calibrator.calibrate(raw_p_model)
 
+        # Quantitative Edge Research: Phase A shadow feature computation
+        # 1. Lead-lag return: 3s spot return on Binance vs Polymarket contract mid
+        spot_lead_lag = 0.0
+        if len(self.spot_feed.second_buckets) >= 4:
+            p_curr = self.spot_feed.second_buckets[-1][1]
+            p_prev = self.spot_feed.second_buckets[-4][1]
+            if p_prev > 0:
+                spot_lead_lag = (p_curr - p_prev) / p_prev
+
+        # 2. TWAP settlement deviation: divergence of current spot from known trailing TWAP
+        twap_dev = 0.0
+        if known_avg_price is not None and spot_price > 0:
+            twap_dev = (spot_price - known_avg_price) / spot_price
+
+        # 3. Multilevel book depth skew across top bids/asks
+        bids_depth = sum(float(l["size"]) for l in live_quotes.get("yes_bids", [])[:3] if isinstance(l, dict) and "size" in l)
+        asks_depth = sum(float(l["size"]) for l in live_quotes.get("yes_asks", [])[:3] if isinstance(l, dict) and "size" in l)
+        tot_depth = bids_depth + asks_depth
+        book_depth_skew = (bids_depth - asks_depth) / tot_depth if tot_depth > 0 else 0.0
+
         self.calibrator.log_observation(
             window_id=self.current_window_id,
             tau_sec=time_remaining_sec,
@@ -646,7 +666,10 @@ class AssetTradingEngine:
             p_model=raw_p_model,
             p_market=live_quotes["yes_ask"],
             p_model_shadow=p_model_shadow,
-            cbi=cbi
+            cbi=cbi,
+            spot_lead_lag=spot_lead_lag,
+            twap_dev=twap_dev,
+            book_depth_skew=book_depth_skew
         )
 
         market_info = {

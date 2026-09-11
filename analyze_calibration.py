@@ -175,6 +175,69 @@ def analyze_calibration(asset="btc", calib_path=None, event_path=None, min_windo
         gate = "PASS" if (num_windows >= min_windows and profit_factor > 1.20) else "NOT YET"
         print(f"\nGo-live gate (>= {min_windows} settled windows AND net-of-fee profit factor > 1.20): {gate}")
 
+    # -------------------------------------------------------------
+    # 5. WALK-FORWARD VALIDATION & HYPOTHESIS TESTING (PHASE B/C)
+    # -------------------------------------------------------------
+    print("\n" + "=" * 70)
+    print(f"QUANTITATIVE EDGE HYPOTHESIS & WALK-FORWARD AUDIT ({asset.upper()})")
+    print("=" * 70)
+
+    # Chronological walk-forward split (60% Train / 40% Out-of-Sample Test on independent windows)
+    sorted_windows = window_df.sort_values("timestamp").reset_index(drop=True)
+    n_total = len(sorted_windows)
+    if n_total >= 20:
+        split_idx = int(n_total * 0.60)
+        train_df = sorted_windows.iloc[:split_idx]
+        test_df = sorted_windows.iloc[split_idx:]
+
+        # Brier Score Comparisons
+        brier_model_train = ((train_df["p_model"] - train_df["realized_up"]) ** 2).mean()
+        brier_mkt_train = ((train_df["p_market"] - train_df["realized_up"]) ** 2).mean()
+        brier_model_test = ((test_df["p_model"] - test_df["realized_up"]) ** 2).mean()
+        brier_mkt_test = ((test_df["p_market"] - test_df["realized_up"]) ** 2).mean()
+
+        print(f"\n--- Walk-Forward Out-of-Sample Brier Comparison ({len(train_df)} Train / {len(test_df)} Test Windows) ---")
+        print(f"Train Set : Model Brier = {brier_model_train:.4f} | Market Brier = {brier_mkt_train:.4f} (Model Delta: {brier_model_train - brier_mkt_train:+.4f})")
+        print(f"OOS Test  : Model Brier = {brier_model_test:.4f} | Market Brier = {brier_mkt_test:.4f} (Model Delta: {brier_model_test - brier_mkt_test:+.4f})")
+        
+        test_edge_ratio = ((brier_mkt_test - brier_model_test) / brier_mkt_test) * 100.0
+        print(f"Out-of-Sample Market Outperformance: {test_edge_ratio:+.2f}%")
+
+        # Correlation between logged model edge and realized outcome
+        test_df = test_df.copy()
+        test_df["logged_edge"] = test_df["p_model"] - test_df["p_market"]
+        corr = test_df["logged_edge"].corr(test_df["realized_up"])
+        print(f"OOS Correlation (Logged Edge vs Outcome): r = {corr:+.4f}")
+    else:
+        print(f"Need >= 20 independent windows for walk-forward split (currently {n_total}).")
+
+    # Hypothesis 1 & 2: Edge feature tests if shadow columns are present
+    has_lead_lag = "spot_lead_lag" in window_df.columns and window_df["spot_lead_lag"].abs().sum() > 0
+    has_twap_dev = "twap_dev" in window_df.columns and window_df["twap_dev"].abs().sum() > 0
+
+    if has_lead_lag:
+        lead_lag_corr = window_df["spot_lead_lag"].corr(window_df["realized_up"])
+        print(f"\nHypothesis 1 (Spot Lead-Lag): 3s Binance Momentum vs Realized Outcome: r = {lead_lag_corr:+.4f}")
+    else:
+        print("\nHypothesis 1 (Spot Lead-Lag): Shadow logging collecting ticks...")
+
+    if has_twap_dev:
+        twap_corr = window_df["twap_dev"].corr(window_df["realized_up"])
+        print(f"Hypothesis 2 (TWAP Settlement Bias): Spot/TWAP Spread vs Realized Outcome: r = {twap_corr:+.4f}")
+    else:
+        print("Hypothesis 2 (TWAP Settlement Bias): Shadow logging collecting ticks...")
+
+    # Phase D Qualification Gate Summary
+    print("\n--- Phase D Go-Live Qualification Gate ---")
+    c1 = (num_windows >= 300)
+    c2 = (n_total >= 20 and brier_model_test < brier_mkt_test)
+    c3 = (matched > 0 and profit_factor > 1.20)
+    print(f"1. Sample Size >= 300 Windows       : {'PASS' if c1 else f'IN PROGRESS ({num_windows}/300)'}")
+    print(f"2. OOS Model Brier < Market Brier   : {'PASS' if c2 else 'NOT MET'}")
+    print(f"3. Net-of-Fee Profit Factor > 1.20  : {'PASS' if c3 else f'NOT MET ({profit_factor:.3f})' if matched > 0 else 'NO EXECUTED TRADES'}")
+    overall = "QUALIFIED FOR LIVE CAPITAL" if (c1 and c2 and c3) else "REMAIN IN PAPER TRADING SHADOW MODE"
+    print(f"VERDICT: {overall}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze quantitative calibration and PnL for 5-minute bot.")
     parser.add_argument("--asset", type=str, default="btc", help="Asset to analyze (e.g. btc, eth, sol). Default: btc")
