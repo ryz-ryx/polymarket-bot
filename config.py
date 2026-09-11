@@ -70,4 +70,9 @@ class BotConfig(BaseModel):
     notify_on_rollup: bool = os.getenv("NOTIFY_ON_ROLLUP", "true").lower() == "true"
     notify_on_crash: bool = os.getenv("NOTIFY_ON_CRASH", "true").lower() == "true"
 
+    # Shared secret for the dashboard's POST /api/control endpoint (pause/resume).
+    # Left unset by default -- an unset secret means POST /api/control is refused
+    # entirely (fail closed), not left open.
+    control_secret: str = os.getenv("CONTROL_SECRET", "")
+
 config = BotConfig()

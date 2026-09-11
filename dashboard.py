@@ -4,8 +4,14 @@ import json
 import csv
 import glob
 import time
+import hmac
+import glob as _glob
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import config
+from src.control_state import read_control_state, write_control_state
 
 ASSET_SUFFIX = {"BTC": "", "ETH": "_eth", "SOL": "_sol"}
 
@@ -152,6 +158,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.serve_api_funnel(parse_qs(parsed.query))
             elif path == "/api/calibration":
                 self.serve_api_calibration(parse_qs(parsed.query))
+            elif path == "/api/control":
+                self.serve_api_control_get()
+            elif path == "/api/logs":
+                self.serve_api_logs(parse_qs(parsed.query))
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"Not Found")
+        except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError):
+            pass
+
+    def do_POST(self):
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/control":
+                self.serve_api_control_post()
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -378,6 +400,67 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "model_better_than_market": (model_brier < market_brier) if (model_brier is not None and market_brier is not None) else None,
             "window_fully_covered": covered,
         })
+
+    def serve_api_control_get(self):
+        state = read_control_state(force=True)
+        self._send_json({
+            "paused": state.get("paused", False),
+            "updated_at": state.get("updated_at"),
+            "updated_by": state.get("updated_by"),
+            "secret_configured": bool(config.control_secret),
+        })
+
+    def serve_api_control_post(self):
+        if not config.control_secret:
+            self._send_json({"error": "CONTROL_SECRET is not set on the server -- POST /api/control is disabled (fail closed)."}, status=503)
+            return
+        supplied = self.headers.get("X-Control-Secret", "")
+        if not hmac.compare_digest(supplied, config.control_secret):
+            self._send_json({"error": "invalid or missing X-Control-Secret header"}, status=401)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            body = json.loads(raw or b"{}")
+        except Exception:
+            self._send_json({"error": "invalid JSON body"}, status=400)
+            return
+        if "paused" not in body or not isinstance(body["paused"], bool):
+            self._send_json({"error": "body must be a JSON object with a boolean 'paused' field"}, status=400)
+            return
+        updated_by = str(body.get("updated_by", "unknown"))[:100]
+        state = write_control_state(bool(body["paused"]), updated_by=updated_by)
+        self._send_json({"ok": True, **state})
+
+    def serve_api_logs(self, query):
+        lines_wanted = min(max(int(_safe_float(query.get("lines", ["200"])[0], 200)), 1), 2000)
+        log_files = sorted(_glob.glob(os.path.join(BASE_DIR, "logs", "bot_*.log")))
+        if not log_files:
+            self._send_json({"error": "no log files found yet", "lines": []}, status=404)
+            return
+        latest = log_files[-1]
+        try:
+            # Tail-read: grow the read window until enough lines are captured.
+            tail_bytes = 200_000
+            full_size = os.path.getsize(latest)
+            while True:
+                with open(latest, "rb") as f:
+                    if tail_bytes >= full_size:
+                        f.seek(0)
+                    else:
+                        f.seek(full_size - tail_bytes)
+                    data = f.read()
+                text = data.decode("utf-8", errors="replace")
+                lines = text.split("\n")
+                if len(lines) > 1:
+                    lines = lines[1:]
+                lines = [l for l in lines if l.strip()]
+                if len(lines) >= lines_wanted or tail_bytes >= full_size or tail_bytes >= 8_000_000:
+                    break
+                tail_bytes *= 4
+            self._send_json({"file": os.path.basename(latest), "lines": lines[-lines_wanted:]})
+        except Exception as e:
+            self._send_json({"error": f"failed to read log file: {e}"}, status=500)
 
     def serve_healthz(self):
         now = time.time()

@@ -18,6 +18,7 @@ from src.deribit_feed import DeribitFeed
 from src.coinbase_feed import CoinbaseFeed
 from src.book_ws import PolymarketBookWS
 from src.strategies.claud_quant import ClaudQuantBinaryOptionStrategy, estimate_taker_fee_fraction
+from src.control_state import is_paused
 from src import notifier
 
 RECONCILIATION_MAX_AGE_SEC = 7200.0
@@ -1232,9 +1233,18 @@ class Polymarket5mBot:
             await asyncio.sleep(1)
 
     async def _run_engine_loop(self, engine: AssetTradingEngine):
+        was_paused = False
         while True:
             try:
-                await engine.tick()
+                if is_paused():
+                    if not was_paused:
+                        logger.warning(f"[{engine.asset}] PAUSED via /api/control -- skipping new trade evaluation until resumed.")
+                    was_paused = True
+                else:
+                    if was_paused:
+                        logger.info(f"[{engine.asset}] RESUMED via /api/control -- trade evaluation active again.")
+                    was_paused = False
+                    await engine.tick()
             except Exception as e:
                 logger.error(f"Unexpected error in engine loop [{engine.asset}]: {type(e).__name__}: {e}")
             await asyncio.sleep(1)
