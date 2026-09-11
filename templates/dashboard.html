@@ -133,6 +133,69 @@
         #last-updated {
             color: #888888;
         }
+        .logs-section {
+            border: 1px solid #ffffff;
+            padding: 12px;
+            margin-top: 16px;
+        }
+        .logs-controls {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+        .logs-controls label {
+            color: #aaaaaa;
+            cursor: pointer;
+            user-select: none;
+        }
+        .logs-controls select {
+            background: #000;
+            color: #fff;
+            border: 1px solid #555;
+            font-family: inherit;
+            font-size: 11px;
+            padding: 1px 2px;
+        }
+        #log-pause-btn {
+            cursor: pointer;
+            background: #000;
+            font-family: inherit;
+        }
+        #log-pause-btn:hover {
+            background: #222222;
+        }
+        #log-console {
+            height: 340px;
+            overflow-y: auto;
+            background: #000000;
+            border-top: 1px dashed #ffffff;
+            margin-top: 10px;
+            padding-top: 8px;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .log-line {
+            padding: 1px 0;
+        }
+        .log-DEBUG {
+            color: #666666;
+        }
+        .log-INFO {
+            color: #cccccc;
+        }
+        .log-WARNING {
+            color: #e0c341;
+        }
+        .log-ERROR, .log-CRITICAL {
+            color: #ff5c5c;
+            font-weight: bold;
+        }
+        .logs-empty {
+            color: #666666;
+            text-align: center;
+            padding: 20px;
+        }
     </style>
 </head>
 <body>
@@ -261,6 +324,25 @@
         </table>
     </div>
 
+    <div class="logs-section" id="logs-section">
+        <div class="feed-header">
+            <span>[ LIVE LOG STREAM ]</span>
+            <div class="logs-controls">
+                <span id="log-file" style="color: #888;"></span>
+                <label><input type="checkbox" id="log-autoscroll" checked> AUTOSCROLL</label>
+                <label>LINES
+                    <select id="log-lines">
+                        <option value="100">100</option>
+                        <option value="300" selected>300</option>
+                        <option value="1000">1000</option>
+                    </select>
+                </label>
+                <button id="log-pause-btn" class="status-badge">PAUSE</button>
+            </div>
+        </div>
+        <div id="log-console"><div class="logs-empty">CONNECTING TO LOG STREAM...</div></div>
+    </div>
+
     <script>
         function formatTime(ts) {
             if (!ts) return '--:--:--';
@@ -369,8 +451,8 @@
                             pnlText = `${f.delta >= 0 ? '+$' : '-$'}${Math.abs(f.delta).toFixed(2)}`;
                         }
 
-                        const linkHtml = f.slug 
-                            ? `<a class="poly-link" href="https://polymarket.com/event/${f.slug}" target="_blank">View ↗</a>` 
+                        const linkHtml = f.slug
+                            ? `<a class="poly-link" href="https://polymarket.com/event/${f.slug}" target="_blank">View ↗</a>`
                             : '-';
 
                         return `
@@ -397,6 +479,79 @@
 
         setInterval(updateDashboard, 1500);
         updateDashboard();
+
+        // ---- Live log stream ----
+        let logPaused = false;
+        let logAutoscroll = true;
+        let logLastRendered = [];
+
+        function escapeHtml(s) {
+            return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function logLevelClass(line) {
+            if (line.includes('| CRITICAL')) return 'log-CRITICAL';
+            if (line.includes('| ERROR')) return 'log-ERROR';
+            if (line.includes('| WARNING')) return 'log-WARNING';
+            if (line.includes('| DEBUG')) return 'log-DEBUG';
+            return 'log-INFO';
+        }
+
+        function renderLogLines(lines) {
+            const box = document.getElementById('log-console');
+            if (lines.length === 0) {
+                box.innerHTML = '<div class="logs-empty">NO LOG OUTPUT YET</div>';
+                return;
+            }
+            // Only touch the DOM when content actually changed, so scroll
+            // position and text selection survive a poll that returned the
+            // same tail (nothing new happened).
+            const sameAsLast = lines.length === logLastRendered.length &&
+                lines[lines.length - 1] === logLastRendered[logLastRendered.length - 1] &&
+                lines[0] === logLastRendered[0];
+            if (sameAsLast) return;
+
+            const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+            box.innerHTML = lines.map(l =>
+                `<div class="log-line ${logLevelClass(l)}">${escapeHtml(l)}</div>`
+            ).join('');
+            logLastRendered = lines;
+
+            if (logAutoscroll && nearBottom) {
+                box.scrollTop = box.scrollHeight;
+            }
+        }
+
+        async function updateLogs() {
+            if (logPaused) return;
+            try {
+                const wantLines = document.getElementById('log-lines').value;
+                const res = await fetch('/api/logs?lines=' + wantLines);
+                if (!res.ok) return;
+                const data = await res.json();
+                document.getElementById('log-file').textContent = data.file || '';
+                renderLogLines(data.lines || []);
+            } catch (err) {
+                // Silent -- a failed log poll shouldn't disturb the rest of
+                // the dashboard, the next poll will just try again.
+            }
+        }
+
+        document.getElementById('log-pause-btn').addEventListener('click', (e) => {
+            logPaused = !logPaused;
+            e.target.textContent = logPaused ? 'RESUME' : 'PAUSE';
+            e.target.style.borderStyle = logPaused ? 'dashed' : 'solid';
+        });
+        document.getElementById('log-autoscroll').addEventListener('change', (e) => {
+            logAutoscroll = e.target.checked;
+        });
+        document.getElementById('log-lines').addEventListener('change', () => {
+            logLastRendered = [];
+            updateLogs();
+        });
+
+        setInterval(updateLogs, 2000);
+        updateLogs();
     </script>
 </body>
 </html>
