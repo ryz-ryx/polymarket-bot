@@ -2,7 +2,7 @@ import asyncio
 import json
 import random
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 import aiohttp
 from aiohttp.resolver import AsyncResolver
 from loguru import logger

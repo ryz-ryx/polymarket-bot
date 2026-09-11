@@ -3,6 +3,7 @@ import sys
 import json
 import csv
 import glob
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
@@ -89,6 +90,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.serve_html()
             elif path == "/api/state":
                 self.serve_api_state()
+            elif path == "/healthz":
+                self.serve_healthz()
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -164,6 +167,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_healthz(self):
+        now = time.time()
+        freshest = None
+        for suffix in ("", "_eth", "_sol"):
+            fp = os.path.join(BASE_DIR, "data", f"trade_events{suffix}.csv")
+            if os.path.exists(fp):
+                mtime = os.path.getmtime(fp)
+                freshest = mtime if freshest is None else max(freshest, mtime)
+        age = (now - freshest) if freshest else None
+        healthy = age is not None and age < 30
+        body = json.dumps({"healthy": healthy, "age_sec": age}).encode()
+        self.send_response(200 if healthy else 503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
