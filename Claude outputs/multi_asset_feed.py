@@ -4,7 +4,6 @@ import json
 import aiohttp
 from typing import Dict, Any, Optional, Tuple
 from loguru import logger
-from src.book_ws import PolymarketBookWS
 
 class MultiAssetResearchFeed:
     """
@@ -18,13 +17,10 @@ class MultiAssetResearchFeed:
     GAMMA_API = "https://gamma-api.polymarket.com"
     CLOB_API = "https://clob.polymarket.com"
 
-    def __init__(self, poll_interval: float = 2.0, book_ws: Optional[PolymarketBookWS] = None):
+    def __init__(self, poll_interval: float = 2.0):
         self.poll_interval = poll_interval
         self.is_running = False
         self._session: Optional[aiohttp.ClientSession] = None
-        # Shared WebSocket book feed -- see src/book_ws.py. Falls back to REST
-        # (with the circuit breaker below) when unavailable or not yet fresh.
-        self.book_ws = book_ws
         
         # State: asset -> {slug, yes_ask, no_ask, p_implied_up, updated_at}
         self.market_state: Dict[str, Dict[str, Any]] = {
@@ -32,35 +28,9 @@ class MultiAssetResearchFeed:
             "sol": {}
         }
 
-        # Was re-discovering (Gamma /events) every 2s poll tick even after the
-        # window's tokens were already known -- pure waste. Cache per window_ts.
-        self._discovered_cache: Dict[str, Tuple[int, str, str, str]] = {}  # asset -> (window_ts, slug, token_yes, token_no)
-
-        # Circuit breaker for CLOB /book: after repeated 403s (Cloudflare
-        # challenge/block, not a documented rate limit -- Polymarket docs list
-        # /book at 1500 req/10s, far above what this feed sends), stop hammering
-        # the endpoint for a cooldown instead of retrying every tick.
-        self._book_403_streak: int = 0
-        self._book_backoff_until: float = 0.0
-
     async def start(self):
         self.is_running = True
-        try:
-            from aiohttp.resolver import AsyncResolver
-            resolver = AsyncResolver(nameservers=["1.1.1.1", "8.8.8.8"])
-            connector = aiohttp.TCPConnector(resolver=resolver)
-        except Exception as e:
-            logger.debug(f"AsyncResolver init notice: {e}")
-            connector = None
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://polymarket.com/",
-            "Origin": "https://polymarket.com",
-        }
-        self._session = aiohttp.ClientSession(connector=connector, headers=headers)
+        self._session = aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"})
         logger.info("Starting Multi-Asset Research Feed (ETH & SOL 5m)...")
         asyncio.create_task(self._poll_loop())
 
@@ -70,37 +40,18 @@ class MultiAssetResearchFeed:
             await self._session.close()
 
     async def _fetch_book(self, token_id: str) -> Tuple[Optional[float], Optional[float]]:
-        if self.book_ws is not None:
-            ws_book = self.book_ws.get_book(token_id)
-            if ws_book is not None:
-                return ws_book["best_bid"], ws_book["best_ask"]
         if not self._session or self._session.closed:
-            return None, None
-        if time.time() < self._book_backoff_until:
             return None, None
         try:
             url = f"{self.CLOB_API}/book?token_id={token_id}"
             async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                 if resp.status == 200:
-                    self._book_403_streak = 0
                     data = await resp.json()
                     bids = data.get("bids", [])
                     asks = data.get("asks", [])
                     best_bid = sorted([float(b["price"]) for b in bids], reverse=True)[0] if bids else None
                     best_ask = sorted([float(a["price"]) for a in asks])[0] if asks else None
                     return best_bid, best_ask
-                elif resp.status == 403:
-                    body = await resp.text()
-                    self._book_403_streak += 1
-                    logger.warning(
-                        f"MultiAssetFeed._fetch_book: HTTP 403 (streak={self._book_403_streak}) for token {token_id} | "
-                        f"Server={resp.headers.get('Server', '-')} CF-RAY={resp.headers.get('CF-RAY', '-')} "
-                        f"CF-Mitigated={resp.headers.get('cf-mitigated', '-')} | body: {body[:150]}"
-                    )
-                    if self._book_403_streak >= 3:
-                        backoff_s = min(30 * (2 ** (self._book_403_streak - 3)), 300)
-                        self._book_backoff_until = time.time() + backoff_s
-                        logger.warning(f"MultiAssetFeed._fetch_book: {self._book_403_streak} consecutive 403s -- backing off /book polling for {backoff_s:.0f}s")
                 else:
                     # DIAGNOSTIC: was completely silent before (no log at all, not even
                     # debug) -- ETH(P)/SOL(P) showed N/A for the entire ~4h run with zero
@@ -148,15 +99,7 @@ class MultiAssetResearchFeed:
             window_ts = int(now // 300) * 300
             for asset in ["eth", "sol"]:
                 try:
-                    cached = self._discovered_cache.get(asset)
-                    if cached and cached[0] == window_ts:
-                        res = (cached[1], cached[2], cached[3])
-                    else:
-                        res = await self._discover_asset_market(asset, window_ts)
-                        if res:
-                            self._discovered_cache[asset] = (window_ts, res[0], res[1], res[2])
-                            if self.book_ws is not None:
-                                self.book_ws.set_tokens(asset, [res[1], res[2]])
+                    res = await self._discover_asset_market(asset, window_ts)
                     if res:
                         slug, token_yes, token_no = res
                         (yes_bid, yes_ask), (no_bid, no_ask) = await asyncio.gather(

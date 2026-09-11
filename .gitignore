@@ -10,6 +10,9 @@ venv/
 # Runtime state / accumulating data - this is machine-local, not source
 data/*.csv
 data/*.json
+data/*.jsonl
+data/*.tmp
+logs/
 
 # OS
 .DS_Store

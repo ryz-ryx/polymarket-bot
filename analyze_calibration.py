@@ -1,15 +1,23 @@
 import os
+import argparse
 import pandas as pd
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from src.strategies.claud_quant import estimate_taker_fee_fraction
 
-CALIB_LOG = "data/calibration_log.csv"
-EVENT_LOG = "data/trade_events.csv"
+def get_asset_paths(asset: str = "btc"):
+    asset = asset.lower()
+    if asset == "btc":
+        return "data/calibration_log.csv", "data/trade_events.csv"
+    return f"data/calibration_log_{asset}.csv", f"data/trade_events_{asset}.csv"
 
-def analyze_calibration(calib_path=CALIB_LOG, event_path=EVENT_LOG, min_windows=30):
+def analyze_calibration(asset="btc", calib_path=None, event_path=None, min_windows=30):
+    default_calib, default_event = get_asset_paths(asset)
+    calib_path = calib_path or default_calib
+    event_path = event_path or default_event
+
     print("=" * 70)
-    print("POLYMARKET 5-MINUTE QUANT QUANTITATIVE AUDIT & FUNNEL REPORT")
+    print(f"POLYMARKET 5-MINUTE QUANT AUDIT & FUNNEL REPORT ({asset.upper()})")
     print("=" * 70)
 
     # -------------------------------------------------------------
@@ -168,4 +176,9 @@ def analyze_calibration(calib_path=CALIB_LOG, event_path=EVENT_LOG, min_windows=
         print(f"\nGo-live gate (>= {min_windows} settled windows AND net-of-fee profit factor > 1.20): {gate}")
 
 if __name__ == "__main__":
-    analyze_calibration()
+    parser = argparse.ArgumentParser(description="Analyze quantitative calibration and PnL for 5-minute bot.")
+    parser.add_argument("--asset", type=str, default="btc", help="Asset to analyze (e.g. btc, eth, sol). Default: btc")
+    parser.add_argument("--min-windows", type=int, default=30, help="Minimum settled windows for gate.")
+    args = parser.parse_args()
+
+    analyze_calibration(asset=args.asset, min_windows=args.min_windows)

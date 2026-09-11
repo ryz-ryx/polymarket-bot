@@ -4,7 +4,6 @@ import time
 from typing import Dict, Any, Optional, List, Tuple
 import aiohttp
 from loguru import logger
-from src.book_ws import PolymarketBookWS
 
 class PolymarketFeed:
     """
@@ -14,13 +13,8 @@ class PolymarketFeed:
     GAMMA_API = "https://gamma-api.polymarket.com"
     CLOB_API = "https://clob.polymarket.com"
 
-    def __init__(self, asset: str = "BTC", book_ws: Optional[PolymarketBookWS] = None):
+    def __init__(self, asset: str = "BTC"):
         self.asset = asset.lower()
-        # Shared WebSocket book feed (see src/book_ws.py) -- replaces per-tick REST
-        # /book polling, which is what triggered Cloudflare's bot-challenge on
-        # 2026-09-09. Falls back to REST (with its own circuit breaker below) if the
-        # WS feed isn't supplied or hasn't got a fresh snapshot yet.
-        self.book_ws = book_ws
         self.current_window_ts: int = 0
         self.current_market: Optional[Dict[str, Any]] = None
         self.token_id_yes: Optional[str] = None
@@ -28,31 +22,10 @@ class PolymarketFeed:
         self.market_title: str = ""
         self.session: Optional[aiohttp.ClientSession] = None
         self.last_fetch_ts: float = 0.0
-        # Circuit breaker for CLOB /book: after repeated 403s (Cloudflare
-        # challenge/block, not a documented rate limit -- Polymarket docs list
-        # /book at 1500 req/10s, far above our ~4 req/s), stop hammering the
-        # endpoint for a cooldown instead of retrying every tick.
-        self._book_403_streak: int = 0
-        self._book_backoff_until: float = 0.0
 
     async def get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
-            try:
-                from aiohttp.resolver import AsyncResolver
-                resolver = AsyncResolver(nameservers=["1.1.1.1", "8.8.8.8"])
-                connector = aiohttp.TCPConnector(resolver=resolver)
-            except Exception as e:
-                logger.debug(f"AsyncResolver init notice: {e}")
-                connector = None
-
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://polymarket.com/",
-                "Origin": "https://polymarket.com",
-            }
-            self.session = aiohttp.ClientSession(connector=connector, headers=headers)
+            self.session = aiohttp.ClientSession()
         return self.session
 
     def get_slug_for_window(self, window_ts: int) -> str:
@@ -98,8 +71,6 @@ class PolymarketFeed:
                                             f"Polymarket: Locked onto live 5m market '{self.market_title}' | "
                                             f"Tokens: YES={self.token_id_yes[:10]}... NO={self.token_id_no[:10]}..."
                                         )
-                                        if self.book_ws is not None:
-                                            self.book_ws.set_tokens(self.asset.lower(), [self.token_id_yes, self.token_id_no])
                                         return self.current_market
                     else:
                         # DIAGNOSTIC: this was completely silent before (no branch at all for
@@ -184,18 +155,11 @@ class PolymarketFeed:
         return vwap, total_cost, total_shares
 
     async def _fetch_single_book(self, token_id: str) -> Tuple[Optional[float], Optional[float], List[Dict[str, float]], List[Dict[str, float]]]:
-        if self.book_ws is not None:
-            ws_book = self.book_ws.get_book(token_id, max_age_s=20.0)
-            if ws_book is not None:
-                return ws_book["best_bid"], ws_book["best_ask"], ws_book["bids"], ws_book["asks"]
-        if time.time() < self._book_backoff_until:
-            return None, None, [], []
         session = await self.get_session()
         try:
             url = f"{self.CLOB_API}/book?token_id={token_id}"
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
                 if resp.status == 200:
-                    self._book_403_streak = 0
                     data = await resp.json()
                     raw_bids = data.get("bids", [])
                     raw_asks = data.get("asks", [])
@@ -206,18 +170,6 @@ class PolymarketFeed:
                     best_bid = sorted([b["price"] for b in parsed_bids], reverse=True)[0] if parsed_bids else None
                     best_ask = sorted([a["price"] for a in parsed_asks])[0] if parsed_asks else None
                     return best_bid, best_ask, parsed_bids, parsed_asks
-                elif resp.status == 403:
-                    body = await resp.text()
-                    self._book_403_streak += 1
-                    logger.warning(
-                        f"_fetch_single_book: HTTP 403 (streak={self._book_403_streak}) for token {token_id} | "
-                        f"Server={resp.headers.get('Server', '-')} CF-RAY={resp.headers.get('CF-RAY', '-')} "
-                        f"CF-Mitigated={resp.headers.get('cf-mitigated', '-')} | body: {body[:150]}"
-                    )
-                    if self._book_403_streak >= 3:
-                        backoff_s = min(30 * (2 ** (self._book_403_streak - 3)), 300)
-                        self._book_backoff_until = time.time() + backoff_s
-                        logger.warning(f"_fetch_single_book: {self._book_403_streak} consecutive 403s -- backing off /book polling for {backoff_s:.0f}s")
                 else:
                     body = await resp.text()
                     logger.warning(f"_fetch_single_book: HTTP {resp.status} for token {token_id}: {body[:200]}")

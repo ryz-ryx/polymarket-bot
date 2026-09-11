@@ -7,13 +7,14 @@ from loguru import logger
 class DeribitFeed:
     """
     Asynchronous feed for Deribit public market data:
-    1. Deribit BTC Index Price ('btc_usd'): Multi-exchange composite reference price.
-    2. Deribit BTC Volatility Index ('DVOL'): Market-implied 30-day annualized volatility.
+    1. Deribit Index Price (e.g. 'btc_usd', 'eth_usd'): Multi-exchange composite reference price.
+    2. Deribit Volatility Index ('DVOL'): Market-implied 30-day annualized volatility.
 
     Used as an external benchmark against Binance spot and as a Bayesian prior
     for short-horizon realized volatility.
     """
-    def __init__(self, index_poll_interval: float = 2.0, dvol_poll_interval: float = 60.0):
+    def __init__(self, currency: str = "BTC", index_poll_interval: float = 2.0, dvol_poll_interval: float = 60.0):
+        self.currency = currency.upper()
         self.index_poll_interval = index_poll_interval
         self.dvol_poll_interval = dvol_poll_interval
 
@@ -29,9 +30,12 @@ class DeribitFeed:
         self._headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
     async def start(self):
+        if self.currency not in ("BTC", "ETH"):
+            # Deribit index / DVOL not supported for this asset (e.g. SOL)
+            return
         self.is_running = True
         self._session = aiohttp.ClientSession(headers=self._headers)
-        logger.info("Starting Deribit public market data feed (Index + DVOL)...")
+        logger.info(f"Starting Deribit public market data feed for {self.currency} (Index + DVOL)...")
         asyncio.create_task(self._poll_index_loop())
         asyncio.create_task(self._poll_dvol_loop())
 
@@ -41,7 +45,8 @@ class DeribitFeed:
             await self._session.close()
 
     async def _poll_index_loop(self):
-        url = "https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd"
+        index_name = f"{self.currency.lower()}_usd"
+        url = f"https://www.deribit.com/api/v2/public/get_index_price?index_name={index_name}"
         while self.is_running:
             try:
                 if self._session and not self._session.closed:
@@ -54,13 +59,13 @@ class DeribitFeed:
                                 self.index_price = float(idx)
                                 self.index_timestamp = time.time()
             except Exception as e:
-                logger.debug(f"Deribit index price poll notice: {e}")
+                logger.debug(f"Deribit index price poll notice ({self.currency}): {e}")
 
             await asyncio.sleep(self.index_poll_interval)
 
     async def _poll_dvol_loop(self):
         """
-        Polls the Deribit Volatility Index (DVOL) for BTC.
+        Polls the Deribit Volatility Index (DVOL) for the asset.
         CRITICAL: Deribit returns DVOL as percentage points (e.g. 39.45 for 39.45%).
         We divide by 100.0 so that self.dvol_annualized matches the decimal scale
         (0.30 - 2.50) used across our pricing models.
@@ -71,7 +76,7 @@ class DeribitFeed:
                 start_ms = now_ms - (120 * 1000)  # query last 2 minutes
                 url = (
                     f"https://www.deribit.com/api/v2/public/get_volatility_index_data"
-                    f"?currency=BTC&start_timestamp={start_ms}&end_timestamp={now_ms}&resolution=60"
+                    f"?currency={self.currency}&start_timestamp={start_ms}&end_timestamp={now_ms}&resolution=60"
                 )
                 if self._session and not self._session.closed:
                     async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:

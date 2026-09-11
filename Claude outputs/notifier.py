@@ -66,14 +66,10 @@ def alert(message: str) -> None:
     alert_and_wait() instead. Safe to call even with zero channels
     configured (becomes a no-op).
     """
-    try:
-        loop = asyncio.get_running_loop()
-        if config.discord_webhook_url:
-            loop.create_task(_send_discord(message))
-        if config.telegram_bot_token and config.telegram_chat_id:
-            loop.create_task(_send_telegram(message))
-    except RuntimeError:
-        pass
+    if config.discord_webhook_url:
+        asyncio.create_task(_send_discord(message))
+    if config.telegram_bot_token and config.telegram_chat_id:
+        asyncio.create_task(_send_telegram(message))
 
 
 async def alert_and_wait(message: str) -> None:

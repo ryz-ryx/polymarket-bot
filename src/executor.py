@@ -15,10 +15,13 @@ class OrderExecutor:
     - Persistent disk-backed open positions (data/open_positions.json) across restarts.
     - Honest deferred settlement math against on-chain outcomePrices.
     """
-    def __init__(self, paper_trading: bool = True, state_file: str = POSITIONS_FILE):
+    def __init__(self, paper_trading: bool = True, state_file: str = POSITIONS_FILE, asset: str = "BTC"):
         self.paper_trading = paper_trading
-        self.simulated_balance = 500.0
+        self.asset = asset.upper()
+        self.simulated_balance = config.starting_balance_usd
         self.state_file = state_file
+        asset_suffix = "" if self.asset == "BTC" else f"_{self.asset.lower()}"
+        self.fills_log_path = f"data/fills_log{asset_suffix}.jsonl"
         self.clob_client = None
         self.open_paper_positions: List[Dict[str, Any]] = []
 
@@ -33,22 +36,32 @@ class OrderExecutor:
                 with open(self.state_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.open_paper_positions = data.get("positions", [])
-                    self.simulated_balance = float(data.get("simulated_balance", 500.0))
-                    logger.info(f"OrderExecutor: Restored {len(self.open_paper_positions)} open positions from disk. Balance: ${self.simulated_balance:.2f}")
+                    self.simulated_balance = float(data.get("simulated_balance", config.starting_balance_usd))
+                    logger.info(f"OrderExecutor [{self.asset}]: Restored {len(self.open_paper_positions)} open positions from disk. Balance: ${self.simulated_balance:.2f}")
             except Exception as e:
                 logger.error(f"Failed to load positions from disk: {e}")
 
     def _save_positions(self):
         os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
         try:
-            with open(self.state_file, "w", encoding="utf-8") as f:
+            tmp_file = f"{self.state_file}.tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump({
                     "positions": self.open_paper_positions,
                     "simulated_balance": self.simulated_balance,
                     "updated_at": time.time()
                 }, f, indent=2)
+            os.replace(tmp_file, self.state_file)
         except Exception as e:
             logger.error(f"Failed to persist positions to disk: {e}")
+
+    def _log_fill(self, fill_event: Dict[str, Any]):
+        os.makedirs(os.path.dirname(self.fills_log_path), exist_ok=True)
+        try:
+            with open(self.fills_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(fill_event) + "\n")
+        except Exception as e:
+            logger.error(f"Failed to append to fills log {self.fills_log_path}: {e}")
 
     def _init_live_client(self):
         try:
@@ -84,16 +97,25 @@ class OrderExecutor:
         price: float
     ) -> Dict[str, Any]:
         if self.paper_trading:
-            shares = amount_usd / max(price, 0.01)
-            # Real money charges a taker fee here (Polymarket crypto_fees_v2: takerOnly,
-            # fee_fraction = rate * (1-price), live-verified 2026-09-08 -- see
-            # estimate_taker_fee_fraction()). Paper trading used to ignore this entirely,
-            # which meant every reported paper PnL number was fee-free fantasy money --
-            # reconstructing the first 19 real settled trades showed real fees would have
-            # consumed ~27% of the reported edge ($11.50 of $41.79 gross). Deducting it here
-            # makes paper-trading economics match what live execution would actually cost.
             fee_paid = amount_usd * estimate_taker_fee_fraction(price)
-            self.simulated_balance -= (amount_usd + fee_paid)
+            required_funds = amount_usd + fee_paid
+
+            # Affordability guard: prevent simulated bankroll from falling into negative balance
+            if required_funds > self.simulated_balance:
+                logger.warning(
+                    f"[PAPER EXEC BLOCKED] Insufficient balance for {self.asset}: "
+                    f"Required ${required_funds:.2f} (${amount_usd:.2f} + ${fee_paid:.3f} fee) > "
+                    f"Available ${self.simulated_balance:.2f}"
+                )
+                return {
+                    "status": "BLOCKED_INSUFFICIENT_FUNDS",
+                    "required": required_funds,
+                    "available": self.simulated_balance
+                }
+
+            shares = amount_usd / max(price, 0.01)
+            self.simulated_balance -= required_funds
+            now_ts = time.time()
             position = {
                 "window_id": window_id,
                 "slug": slug,
@@ -103,10 +125,25 @@ class OrderExecutor:
                 "price": price,
                 "shares": shares,
                 "fee_paid": fee_paid,
-                "timestamp": time.time()
+                "timestamp": now_ts
             }
             self.open_paper_positions.append(position)
             self._save_positions()
+
+            self._log_fill({
+                "ts": now_ts,
+                "asset": self.asset,
+                "type": "BUY",
+                "window_id": window_id,
+                "slug": slug,
+                "outcome": outcome,
+                "price": price,
+                "size_usd": amount_usd,
+                "shares": shares,
+                "fee_paid": fee_paid,
+                "balance_after": self.simulated_balance
+            })
+
             logger.info(
                 f"[PAPER EXEC] BUY {outcome} (Win {window_id}) | "
                 f"Size: ${amount_usd:.2f} @ {price:.3f} ({shares:.2f} shares) | Fee: ${fee_paid:.3f} | "
@@ -133,14 +170,31 @@ class OrderExecutor:
         if not settling:
             return 0.0
 
+        now_ts = time.time()
         total_window_pnl = 0.0
         for pos in settling:
             is_win = (pos["outcome"] == "YES" and realized_up == 1) or (pos["outcome"] == "NO" and realized_up == 0)
+            pos_slug = pos.get("slug", "")
             if is_win:
                 payout = pos["shares"] * 1.0
                 net_profit = payout - pos["amount_usd"]
                 self.simulated_balance += payout
                 total_window_pnl += net_profit
+
+                self._log_fill({
+                    "ts": now_ts,
+                    "asset": self.asset,
+                    "type": "WIN",
+                    "window_id": window_id,
+                    "slug": pos_slug,
+                    "outcome": pos["outcome"],
+                    "cost": pos["amount_usd"],
+                    "payout": payout,
+                    "net_pnl": net_profit,
+                    "source": source,
+                    "balance_after": self.simulated_balance
+                })
+
                 logger.info(
                     f"🎉 [PAPER SETTLEMENT - WIN via {source}] {pos['outcome']} (Win {window_id}) | "
                     f"Cost: ${pos['amount_usd']:.2f} | Payout: ${payout:.2f} | Net: +${net_profit:.2f} | "
@@ -149,6 +203,21 @@ class OrderExecutor:
             else:
                 net_loss = -pos["amount_usd"]
                 total_window_pnl += net_loss
+
+                self._log_fill({
+                    "ts": now_ts,
+                    "asset": self.asset,
+                    "type": "LOSS",
+                    "window_id": window_id,
+                    "slug": pos_slug,
+                    "outcome": pos["outcome"],
+                    "cost": pos["amount_usd"],
+                    "payout": 0.0,
+                    "net_pnl": net_loss,
+                    "source": source,
+                    "balance_after": self.simulated_balance
+                })
+
                 logger.info(
                     f"💀 [PAPER SETTLEMENT - LOSS via {source}] {pos['outcome']} (Win {window_id}) | "
                     f"Cost: ${pos['amount_usd']:.2f} | Payout: $0.00 | Net: -${pos['amount_usd']:.2f} | "
@@ -191,6 +260,16 @@ class OrderExecutor:
         if abs(delta) > 1e-9:
             self.simulated_balance += delta
             self._save_positions()
+            self._log_fill({
+                "ts": time.time(),
+                "asset": self.asset,
+                "type": "CORRECTION",
+                "window_id": window_id,
+                "delta": delta,
+                "wrong_realized_up": wrong_realized_up,
+                "correct_realized_up": correct_realized_up,
+                "balance_after": self.simulated_balance
+            })
             logger.warning(
                 f"[FALLBACK CORRECTION] Window {window_id}: on-chain outcome ({correct_realized_up}) "
                 f"disagreed with Binance fallback guess ({wrong_realized_up}). "

@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POLYMARKET 5M QUANT // TERMINAL</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background-color: #000000;
+            color: #ffffff;
+            font-family: 'Courier New', Courier, ui-monospace, monospace;
+            padding: 16px;
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        .header {
+            border: 1px solid #ffffff;
+            padding: 12px;
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .title {
+            font-size: 15px;
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+        .status-badge {
+            border: 1px solid #ffffff;
+            padding: 2px 8px;
+            text-transform: uppercase;
+        }
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+        .card {
+            border: 1px solid #ffffff;
+            padding: 12px;
+        }
+        .card-header {
+            border-bottom: 1px solid #ffffff;
+            padding-bottom: 6px;
+            margin-bottom: 10px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+        }
+        .stat-line {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+        .stat-label {
+            color: #aaaaaa;
+        }
+        .stat-value {
+            font-weight: bold;
+        }
+        .positions-box {
+            margin-top: 10px;
+            border-top: 1px dashed #ffffff;
+            padding-top: 8px;
+        }
+        .pos-item {
+            font-size: 12px;
+            margin-bottom: 4px;
+            background: #111111;
+            padding: 4px;
+            border-left: 2px solid #ffffff;
+        }
+        .feed-section {
+            border: 1px solid #ffffff;
+            padding: 12px;
+        }
+        .feed-header {
+            font-weight: bold;
+            border-bottom: 1px solid #ffffff;
+            padding-bottom: 8px;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .feed-table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+        }
+        .feed-table th {
+            border-bottom: 1px solid #ffffff;
+            padding: 6px 8px;
+            color: #aaaaaa;
+            font-weight: normal;
+        }
+        .feed-table td {
+            padding: 6px 8px;
+            border-bottom: 1px solid #222222;
+        }
+        .tag {
+            display: inline-block;
+            padding: 1px 4px;
+            border: 1px solid #ffffff;
+            font-size: 11px;
+        }
+        .win {
+            border-style: solid;
+        }
+        .loss {
+            border-style: dashed;
+        }
+        .buy {
+            border-style: dotted;
+        }
+        a.poly-link {
+            color: #ffffff;
+            text-decoration: none;
+            border-bottom: 1px dotted #888888;
+            font-size: 11px;
+            padding: 0 2px;
+        }
+        a.poly-link:hover {
+            border-bottom: 1px solid #ffffff;
+            background: #222222;
+        }
+        #last-updated {
+            color: #888888;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div>
+            <span class="title">[ POLYMARKET 5M QUANT ENGINE ]</span>
+            <span style="margin-left: 12px; color: #888;">MODE: REAL PAPER TRADING ($50/WALLET)</span>
+            <span id="portfolio-pnl" style="margin-left: 16px; font-weight: bold;">PORTFOLIO: $0.00</span>
+        </div>
+        <div>
+            <span id="portfolio-breaker" class="status-badge" style="margin-right: 8px;">PORTFOLIO: ACTIVE</span>
+            <span id="status-indicator" class="status-badge">SYSTEM LIVE</span>
+            <span id="last-updated" style="margin-left: 12px;">--:--:--</span>
+        </div>
+    </div>
+
+    <div class="grid-3">
+        <!-- BTC -->
+        <div class="card" id="card-btc">
+            <div class="card-header">
+                <span>[ ASSET: BTC ]</span>
+                <span id="btc-breaker">ACTIVE</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">WALLET CASH</span>
+                <span class="stat-value" id="btc-cash">$0.00</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">DAY PNL</span>
+                <span class="stat-value" id="btc-pnl">$0.00</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">MODEL CONFIDENCE</span>
+                <span class="stat-value" id="btc-conf">1.00</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">ACTIVE TRADES</span>
+                <span class="stat-value" id="btc-pos-count">0</span>
+            </div>
+            <div class="positions-box">
+                <div style="color: #888; font-size: 11px; margin-bottom: 4px;">CURRENT IN-FLIGHT POSITIONS:</div>
+                <div id="btc-positions">None</div>
+            </div>
+        </div>
+
+        <!-- ETH -->
+        <div class="card" id="card-eth">
+            <div class="card-header">
+                <span>[ ASSET: ETH ]</span>
+                <span id="eth-breaker">ACTIVE</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">WALLET CASH</span>
+                <span class="stat-value" id="eth-cash">$0.00</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">DAY PNL</span>
+                <span class="stat-value" id="eth-pnl">$0.00</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">MODEL CONFIDENCE</span>
+                <span class="stat-value" id="eth-conf">1.00</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">ACTIVE TRADES</span>
+                <span class="stat-value" id="eth-pos-count">0</span>
+            </div>
+            <div class="positions-box">
+                <div style="color: #888; font-size: 11px; margin-bottom: 4px;">CURRENT IN-FLIGHT POSITIONS:</div>
+                <div id="eth-positions">None</div>
+            </div>
+        </div>
+
+        <!-- SOL -->
+        <div class="card" id="card-sol">
+            <div class="card-header">
+                <span>[ ASSET: SOL ]</span>
+                <span id="sol-breaker">ACTIVE</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">WALLET CASH</span>
+                <span class="stat-value" id="sol-cash">$0.00</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">DAY PNL</span>
+                <span class="stat-value" id="sol-pnl">$0.00</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">MODEL CONFIDENCE</span>
+                <span class="stat-value" id="sol-conf">1.00</span>
+            </div>
+            <div class="stat-line">
+                <span class="stat-label">ACTIVE TRADES</span>
+                <span class="stat-value" id="sol-pos-count">0</span>
+            </div>
+            <div class="positions-box">
+                <div style="color: #888; font-size: 11px; margin-bottom: 4px;">CURRENT IN-FLIGHT POSITIONS:</div>
+                <div id="sol-positions">None</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="feed-section">
+        <div class="feed-header">
+            <span>[ LIVE EXECUTION & SETTLEMENT FEED // CHRONOLOGICAL ]</span>
+            <span id="feed-count" style="color: #888;">0 events</span>
+        </div>
+        <table class="feed-table">
+            <thead>
+                <tr>
+                    <th style="width: 80px;">TIME</th>
+                    <th style="width: 50px;">ASSET</th>
+                    <th style="width: 110px;">ACTION</th>
+                    <th style="width: 90px;">WINDOW</th>
+                    <th style="width: 70px;">OUTCOME</th>
+                    <th>DETAILS</th>
+                    <th style="width: 100px; text-align: right;">PNL / SIZE</th>
+                    <th style="width: 110px; text-align: right;">BALANCE AFTER</th>
+                    <th style="width: 70px; text-align: center;">MARKET</th>
+                </tr>
+            </thead>
+            <tbody id="feed-body">
+                <tr><td colspan="9" style="text-align: center; color: #666; padding: 20px;">WAITING FOR FILLS...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        function formatTime(ts) {
+            if (!ts) return '--:--:--';
+            const d = new Date(ts * 1000);
+            return d.toTimeString().split(' ')[0];
+        }
+
+        async function updateDashboard() {
+            try {
+                const res = await fetch('/api/state');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+
+                document.getElementById('last-updated').textContent = new Date().toTimeString().split(' ')[0];
+                document.getElementById('status-indicator').textContent = 'SYSTEM LIVE';
+                document.getElementById('status-indicator').style.borderColor = '#ffffff';
+
+                // Portfolio status
+                if (data.portfolio) {
+                    const portPnl = data.portfolio.daily_pnl || 0.0;
+                    const portBreaker = data.portfolio.circuit_breaker_triggered;
+                    const pnlElem = document.getElementById('portfolio-pnl');
+                    pnlElem.textContent = 'PORTFOLIO: ' + (portPnl >= 0 ? '+$' : '-$') + Math.abs(portPnl).toFixed(2);
+                    const breakerBadge = document.getElementById('portfolio-breaker');
+                    breakerBadge.textContent = portBreaker ? 'PORTFOLIO: TRIPPED' : 'PORTFOLIO: ACTIVE';
+                    breakerBadge.style.borderStyle = portBreaker ? 'dashed' : 'solid';
+                }
+
+                // Assets: BTC, ETH, SOL
+                ['btc', 'eth', 'sol'].forEach(asset => {
+                    const info = data.assets[asset.toUpperCase()] || {};
+                    const risk = info.risk || {};
+                    const pos = info.positions || {};
+
+                    const cashElem = document.getElementById(asset + '-cash');
+                    const pnlElem = document.getElementById(asset + '-pnl');
+                    const confElem = document.getElementById(asset + '-conf');
+                    const breakerElem = document.getElementById(asset + '-breaker');
+                    const countElem = document.getElementById(asset + '-pos-count');
+                    const listElem = document.getElementById(asset + '-positions');
+
+                    const balance = pos.simulated_balance !== undefined ? pos.simulated_balance : 0.0;
+                    cashElem.textContent = '$' + balance.toFixed(2);
+
+                    const pnl = risk.daily_pnl !== undefined ? risk.daily_pnl : 0.0;
+                    pnlElem.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+
+                    const confWeight = info.confidence_weight !== undefined ? info.confidence_weight : 1.0;
+                    if (confElem) {
+                        confElem.textContent = confWeight.toFixed(2) + (confWeight < 0.5 ? ' (SHRUNK)' : ' (HIGH)');
+                    }
+
+                    const breaker = risk.circuit_breaker_triggered;
+                    breakerElem.textContent = breaker ? '[TRIPPED]' : 'ACTIVE';
+
+                    const openPositions = pos.positions || [];
+                    countElem.textContent = openPositions.length;
+
+                    if (openPositions.length === 0) {
+                        listElem.innerHTML = '<span style="color: #666;">No open positions</span>';
+                    } else {
+                        listElem.innerHTML = openPositions.map(p => {
+                            const linkHtml = p.slug ? ` <a class="poly-link" href="https://polymarket.com/event/${p.slug}" target="_blank">View ↗</a>` : '';
+                            return `
+                                <div class="pos-item">
+                                    Win ${p.window_id} // ${p.outcome} // $${p.amount_usd.toFixed(2)} @ ${p.price.toFixed(3)}${linkHtml}
+                                </div>
+                            `;
+                        }).join('');
+                    }
+                });
+
+                // Merged chronological feed
+                const feed = data.fills || [];
+                document.getElementById('feed-count').textContent = feed.length + ' events';
+                const tbody = document.getElementById('feed-body');
+
+                if (feed.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: #666; padding: 20px;">NO FILLS LOGGED YET</td></tr>';
+                } else {
+                    tbody.innerHTML = feed.slice(0, 50).map(f => {
+                        let actionClass = 'tag';
+                        let actionText = f.type || 'EVENT';
+                        let detailText = '';
+                        let pnlText = '';
+
+                        if (f.type === 'BUY') {
+                            actionClass += ' buy';
+                            actionText = 'BOUGHT';
+                            detailText = `Bought ${f.shares ? f.shares.toFixed(2) : '0'}sh @ $${f.price ? f.price.toFixed(3) : '0.00'} (fee $${f.fee_paid ? f.fee_paid.toFixed(3) : '0'})`;
+                            pnlText = `-$${f.size_usd ? f.size_usd.toFixed(2) : '0.00'}`;
+                        } else if (f.type === 'WIN') {
+                            actionClass += ' win';
+                            actionText = 'SOLD (WIN)';
+                            detailText = `Won ${f.source || 'ONCHAIN'} (Cost $${f.cost.toFixed(2)} -> Payout $${f.payout.toFixed(2)})`;
+                            pnlText = `+$${f.net_pnl.toFixed(2)}`;
+                        } else if (f.type === 'LOSS') {
+                            actionClass += ' loss';
+                            actionText = 'SOLD (LOSS)';
+                            detailText = `Loss ${f.source || 'ONCHAIN'} (Cost $${f.cost.toFixed(2)} -> Payout $0.00)`;
+                            pnlText = `-$${Math.abs(f.net_pnl).toFixed(2)}`;
+                        } else if (f.type === 'CORRECTION') {
+                            actionClass += ' tag';
+                            actionText = 'CORRECTION';
+                            detailText = `Reconciliation adjustment (${f.wrong_realized_up} -> ${f.correct_realized_up})`;
+                            pnlText = `${f.delta >= 0 ? '+$' : '-$'}${Math.abs(f.delta).toFixed(2)}`;
+                        }
+
+                        const linkHtml = f.slug 
+                            ? `<a class="poly-link" href="https://polymarket.com/event/${f.slug}" target="_blank">View ↗</a>` 
+                            : '-';
+
+                        return `
+                            <tr>
+                                <td>${formatTime(f.ts)}</td>
+                                <td><strong>${f.asset}</strong></td>
+                                <td><span class="${actionClass}">${actionText}</span></td>
+                                <td>Win ${f.window_id}</td>
+                                <td>${f.outcome || '-'}</td>
+                                <td style="color: #ccc;">${detailText}</td>
+                                <td style="text-align: right; font-weight: bold;">${pnlText}</td>
+                                <td style="text-align: right;">$${f.balance_after ? f.balance_after.toFixed(2) : '-'}</td>
+                                <td style="text-align: center;">${linkHtml}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                }
+
+            } catch (err) {
+                document.getElementById('status-indicator').textContent = 'POLL ERROR';
+                document.getElementById('status-indicator').style.borderColor = '#888888';
+            }
+        }
+
+        setInterval(updateDashboard, 1500);
+        updateDashboard();
+    </script>
+</body>
+</html>

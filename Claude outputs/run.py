@@ -15,7 +15,6 @@ if __name__ == "__main__":
 
     logger.remove()
     logger.add(sys.stdout, format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{message}</cyan>", level="INFO")
-    logger.add("logs/bot_{time:YYYY-MM-DD}.log", rotation="00:00", retention="14 days", level="DEBUG", encoding="utf-8")
 
     bot = Polymarket5mBot()
     try:
@@ -23,6 +22,10 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
     except Exception as e:
+        # This is exactly the failure mode alerts exist for: the bot dies while
+        # nobody's watching the terminal. Best-effort ping before exiting -- if
+        # neither channel is configured this is a silent no-op, and if the alert
+        # itself fails it must not mask or replace the original crash traceback.
         logger.error(f"Bot crashed: {type(e).__name__}: {e}")
         if config.notify_on_crash:
             try:

@@ -4,7 +4,8 @@ import json
 import asyncio
 import time
 import math
-from typing import Dict, Any, List
+import datetime
+from typing import Dict, Any, List, Optional
 from loguru import logger
 from config import config
 from src.spot_feed import SpotFeed
@@ -14,76 +15,106 @@ from src.executor import OrderExecutor
 from src.calibrator import EmpiricalCalibrator
 from src.event_logger import TradeEventLogger, EVENT_LOG
 from src.deribit_feed import DeribitFeed
-from src.multi_asset_feed import MultiAssetResearchFeed
+from src.coinbase_feed import CoinbaseFeed
+from src.book_ws import PolymarketBookWS
 from src.strategies.claud_quant import ClaudQuantBinaryOptionStrategy, estimate_taker_fee_fraction
 from src import notifier
 
-RESOLUTIONS_FILE = "data/pending_resolutions.json"
-RECONCILIATION_FILE = "data/fallback_reconciliation.json"
-RECONCILIATION_MAX_AGE_SEC = 7200.0  # give up chasing on-chain confirmation after 2hr (was 1hr --
-                                      # raised after live evidence, see RESOLUTION_FALLBACK_TIMEOUT_SEC below)
+RECONCILIATION_MAX_AGE_SEC = 7200.0
+RESOLUTION_FALLBACK_TIMEOUT_SEC = 900.0
+TWAP_SETTLEMENT_WINDOW_SEC = 60.0
+ROLLUP_WINDOW_COUNT = 10
 
-# How long to wait for real on-chain confirmation before settling on the Binance-close guess
-# instead. Live-verified 2026-09-08 14:13 UTC by querying Gamma API directly for 4 just-closed
-# BTC 5-min markets: `closed` stays False and outcomePrices sits at a fuzzy last-trade value
-# (e.g. ["0.995","0.005"]) for a while after endDate, only crystallizing to the canonical
-# ["1","0"]/["0","1"] between ~3.5 and ~13.5+ minutes after close. The old 240s (4 min) timeout
-# was firing before the real answer arrived on essentially every window, which meant the bot
-# was running almost entirely on Binance-fallback guesses (verified live: 100% fallback rate
-# across 9 consecutive windows after a restart) instead of ground-truth on-chain settlement --
-# the exact thing the whole fallback-reconciliation subsystem exists to avoid relying on.
-RESOLUTION_FALLBACK_TIMEOUT_SEC = 900.0  # 15 min, ~2x the worst latency observed live
-TWAP_SETTLEMENT_WINDOW_SEC = 60.0  # provisional -- see [ESTIMATOR SCORECARD] logging; public
-                                    # reporting disagrees on 30s vs 60s for Polymarket's real
-                                    # Chainlink TWAP settlement window
-
-ROLLUP_WINDOW_COUNT = 10  # Proposal 4: print a rolling profitability summary every N settled windows
-
-class Polymarket5mBot:
-    def __init__(self):
+class AssetTradingEngine:
+    def __init__(self, asset: str, shared_book_ws: PolymarketBookWS, strategy: Optional[ClaudQuantBinaryOptionStrategy] = None):
+        self.asset = asset.upper()
+        self.book_ws = shared_book_ws
+        self.portfolio_circuit_breaker: bool = False
+        
+        asset_suffix = "" if self.asset == "BTC" else f"_{self.asset.lower()}"
+        
+        max_pos = config.get_max_position_usd(self.asset)
+        max_daily_loss = config.get_max_daily_loss_usd(self.asset)
+        risk_file = f"data/risk_state{asset_suffix}.json"
+        
         self.risk_manager = RiskManager(
-            max_position_usd=config.max_position_usd,
-            max_daily_loss_usd=config.max_daily_loss_usd,
-            kelly_fraction=config.kelly_fraction
+            max_position_usd=max_pos,
+            max_daily_loss_usd=max_daily_loss,
+            kelly_fraction=config.kelly_fraction,
+            state_file=risk_file
         )
-        self.executor = OrderExecutor(paper_trading=config.paper_trading)
-        self.strategy = ClaudQuantBinaryOptionStrategy(
-            min_edge=0.03,
-            taker_fee=0.005,
-            slippage_buffer=config.slippage_tolerance,
-            min_abs_z=0.35
-        )
-        self.market_feed = PolymarketFeed(asset=config.target_asset)
-        self.spot_feed = SpotFeed(symbol=f"{config.target_asset}USDT")
-        self.deribit_feed = DeribitFeed()
-        self.multi_asset_feed = MultiAssetResearchFeed()
-        self.calibrator = EmpiricalCalibrator()
-        self.event_logger = TradeEventLogger()
-        self.last_trade_time = 0.0
+        
+        pos_file = f"data/open_positions{asset_suffix}.json"
+        self.executor = OrderExecutor(paper_trading=config.paper_trading, state_file=pos_file, asset=self.asset)
+        
+        # Asset-specific parameter tuning
+        # Bias entries toward higher-conviction, skewed prices (away from expensive 50/50 fee zone)
+        if self.asset == "ETH":
+            strat_min_edge = 0.045
+            strat_min_abs_z = 0.50
+            strat_min_dist = 0.0005
+            strat_tail_dof = 4.5
+            strat_min_entry_price = None
+            strat_max_entry_price = None
+        elif self.asset == "SOL":
+            strat_min_edge = 0.03
+            strat_min_abs_z = 0.40
+            strat_min_dist = 0.0003
+            strat_tail_dof = 4.5
+            strat_min_entry_price = None
+            strat_max_entry_price = None
+        else: # BTC
+            strat_min_edge = 0.03
+            strat_min_abs_z = 0.40
+            strat_min_dist = 0.0003
+            strat_tail_dof = None
+            strat_min_entry_price = 0.333
+            strat_max_entry_price = 0.50
 
-        # Proposal 4: periodic profitability rollup (in-memory diagnostic, resets on
-        # restart -- calibration_log.csv / trade_events.csv remain the durable source
-        # of truth; this just surfaces a rolling trend in stdout every
-        # ROLLUP_WINDOW_COUNT settled windows without needing analyze_calibration.py).
+        self.strategy = strategy or ClaudQuantBinaryOptionStrategy(
+            min_edge=strat_min_edge,
+            slippage_buffer=config.slippage_tolerance,
+            min_abs_z=strat_min_abs_z,
+            min_strike_distance_pct=strat_min_dist,
+            tail_dof=strat_tail_dof,
+            min_entry_price=strat_min_entry_price,
+            max_entry_price=strat_max_entry_price
+        )
+        
+        self.market_feed = PolymarketFeed(asset=self.asset, book_ws=self.book_ws)
+        self.spot_feed = SpotFeed(symbol=f"{self.asset}USDT")
+        if self.asset in ("BTC", "ETH"):
+            self.deribit_feed = DeribitFeed(currency=self.asset)
+        elif self.asset == "SOL":
+            self.deribit_feed = CoinbaseFeed(currency="SOL")
+        else:
+            self.deribit_feed = None
+        
+        calib_log = f"data/calibration_log{asset_suffix}.csv"
+        calib_obs = f"data/pending_window_observations{asset_suffix}.json"
+        self.calibrator = EmpiricalCalibrator(log_path=calib_log, observations_path=calib_obs)
+        
+        self.event_log_path = f"data/trade_events{asset_suffix}.csv"
+        self.event_logger = TradeEventLogger(log_path=self.event_log_path)
+        self.last_trade_time = 0.0
+        
         self.rollup_history: List[Dict[str, Any]] = []
         self._funnel_tally: Dict[str, int] = {}
-
+        
         self.current_window_id = int(time.time() // 300)
         self.current_window_start = self.current_window_id * 300
         self.strike_price = None
-
-        # Persistent disk-backed pending resolution queue
-        self.resolutions_file = RESOLUTIONS_FILE
+        
+        self.resolutions_file = f"data/pending_resolutions{asset_suffix}.json"
         self.pending_resolutions: List[Dict[str, Any]] = []
         self._load_pending_resolutions()
-
-        # Persistent disk-backed reconciliation queue: windows settled provisionally via
-        # Binance-fallback whose calibration label / paper PnL may still need correcting
-        # once (if) the real on-chain outcome eventually arrives.
-        self.reconciliation_file = RECONCILIATION_FILE
+        
+        self.reconciliation_file = f"data/fallback_reconciliation{asset_suffix}.json"
         self.fallback_reconciliation: List[Dict[str, Any]] = []
         self._load_fallback_reconciliation()
-
+        
+        self.spot_task: Optional[asyncio.Task] = None
+        self.deribit_task: Optional[asyncio.Task] = None
     def _load_pending_resolutions(self):
         if os.path.exists(self.resolutions_file):
             try:
@@ -270,8 +301,8 @@ class Polymarket5mBot:
         """
         predicted_edge = None
         try:
-            if os.path.exists(EVENT_LOG):
-                with open(EVENT_LOG, "r", newline="", encoding="utf-8") as f:
+            if os.path.exists(self.event_log_path):
+                with open(self.event_log_path, "r", newline="", encoding="utf-8") as f:
                     reader = csv.DictReader(f)
                     window_rows = [r for r in reader if r.get("window_id") == str(window_id)]
                 for r in window_rows:
@@ -463,284 +494,380 @@ class Polymarket5mBot:
                 "last_checked": 0.0
             })
 
-        self._save_pending_resolutions()
+    async def tick(self):
+        if self.spot_feed.latest_price is None:
+            return
 
-    async def run(self):
-        logger.info(f"Starting Polymarket 5-Minute Claud-Quant Bot for {config.target_asset}")
-        logger.info(f"Mode: {'[PAPER TRADING]' if config.paper_trading else '[LIVE EXECUTION]'}")
+        spot_price = self.spot_feed.latest_price
+        now = time.time()
+
+        # Check for 5-minute interval rollover (300 seconds)
+        window_id = int(now // 300)
+        window_start = window_id * 300
+
+        if window_id != self.current_window_id or self.strike_price is None:
+            if self.strike_price is not None:
+                # Polymarket's crypto Up/Down markets settle via a Chainlink TWAP
+                # Data Stream (as of the Aug 2026 upgrade), not a single instantaneous
+                # price snapshot -- so an instantaneous Binance spot read is a biased
+                # proxy for the real settlement price. Compute trailing 30s/60s TWAPs
+                # too (public sources disagree on the exact window) and keep all three
+                # so post-hoc comparison against the confirmed on-chain outcome can
+                # tell us empirically which one actually tracks Polymarket's resolution.
+                twap_30 = self.spot_feed.get_trailing_twap(30.0)
+                twap_60 = self.spot_feed.get_trailing_twap(60.0)
+                best_estimate_price = twap_60 if twap_60 is not None else spot_price
+
+                realized_up_estimate = 1 if best_estimate_price >= self.strike_price else 0
+                closing_window_ts = self.current_window_start
+                closing_slug = self.market_feed.get_slug_for_window(closing_window_ts)
+
+                self.pending_resolutions.append({
+                    "window_id": self.current_window_id,
+                    "slug": closing_slug,
+                    "strike_k": self.strike_price,
+                    "settlement_price": best_estimate_price,
+                    "binance_estimate": realized_up_estimate,
+                    "snapshot_price": spot_price,
+                    "twap_30": twap_30,
+                    "twap_60": twap_60,
+                    "queued_at": now,
+                    "last_checked": 0.0
+                })
+                self._save_pending_resolutions()
+                logger.info(
+                    f"Window {self.current_window_id} closed. Queued for Polymarket on-chain resolution "
+                    f"(Slug: {closing_slug}) | snapshot=${spot_price:.2f} twap30={twap_30} twap60={twap_60}"
+                )
+
+            self.current_window_id = window_id
+            self.current_window_start = window_start
+            
+            # RECOVER EXACT WINDOW OPEN STRIKE PRICE (NO DRIFT ON RESTART)
+            exact_open = await self.spot_feed.get_exact_window_open_price(window_start)
+            self.strike_price = exact_open if exact_open is not None else spot_price
+            logger.info(f"[NEW 5-MIN WINDOW] Window {window_id} Strike K initialized at ${self.strike_price:.2f}")
 
         try:
-            await self._recover_orphaned_windows()
+            await self._poll_deferred_resolutions()
         except Exception as e:
-            logger.error(f"Error during orphaned-window recovery: {e}")
+            logger.error(f"Unexpected error in _poll_deferred_resolutions: {e}")
 
-        # Diagnostic: a full ~4h run showed find_active_5min_market/_fetch_single_book/
-        # get_market_resolution ALL failing 100% of the time (0 trades, 0 on-chain
-        # confirmations) while every Binance call succeeded -- and every failure was
-        # previously silent. Check Polymarket connectivity loudly at startup instead of
-        # discovering it three minutes into the first window.
         try:
-            reachable = await self.market_feed.check_connectivity()
-            if not reachable:
-                logger.warning(
-                    "Polymarket API connectivity check FAILED at startup -- expect "
-                    "BLOCKED_PHANTOM and Binance-fallback resolutions until this clears."
-                )
-                if config.notify_on_connectivity_failure:
-                    notifier.alert(
-                        "\U0001F534 Polymarket5mBot: connectivity check FAILED at startup. "
-                        "Gamma/CLOB API unreachable -- expect no real trades or on-chain "
-                        "settlements until this clears. Check your network/DNS."
-                    )
-            elif config.notify_on_startup:
-                notifier.alert(
-                    f"✅ Polymarket5mBot started ({'PAPER TRADING' if config.paper_trading else 'LIVE'}) "
-                    f"| {config.target_asset} | Polymarket connectivity OK."
-                )
+            await self._poll_fallback_reconciliation()
         except Exception as e:
-            logger.error(f"Error during Polymarket connectivity check: {e}")
+            logger.error(f"Unexpected error in _poll_fallback_reconciliation: {e}")
 
-        spot_task = asyncio.create_task(self.spot_feed.start())
-        deribit_task = asyncio.create_task(self.deribit_feed.start())
-        multi_asset_task = asyncio.create_task(self.multi_asset_feed.start())
+        time_remaining_sec = max(300.0 - (now - self.current_window_start), 1.0)
+        raw_vol_ann = self.spot_feed.annualized_vol
+        ofi = self.spot_feed.get_ofi_normalized()
+        momentum = self.spot_feed.get_momentum(lookback_seconds=10.0)
 
-        try:
-            while True:
-                await asyncio.sleep(1)
+        # Proposal 2: Deribit DVOL implied volatility blending
+        # DVOL is forward-looking 30-day implied vol (decimal, e.g. 0.39 for 39%).
+        # Blend 20% DVOL prior with 80% realized trailing vol when available,
+        # stabilizing vol estimation against startup noise or sudden regime shifts.
+        dvol_ann = self.deribit_feed.get_dvol() if self.deribit_feed else None
+        if dvol_ann is not None:
+            vol_ann = 0.80 * raw_vol_ann + 0.20 * dvol_ann
+        else:
+            vol_ann = raw_vol_ann
 
-                if self.spot_feed.latest_price is None:
-                    continue
+        # Proposal 3: Cross-exchange composite reference price tracking
+        # Compares Binance mid against Deribit's multi-exchange composite index
+        composite_idx = self.deribit_feed.get_composite_index() if self.deribit_feed else None
+        basis_spread = (spot_price - composite_idx) if composite_idx is not None else None
 
-                spot_price = self.spot_feed.latest_price
-                now = time.time()
-                
-                # Check for 5-minute interval rollover (300 seconds)
-                window_id = int(now // 300)
-                window_start = window_id * 300
+        # Microprice (Stoikov): size-weighted mid that leans toward the thinner side of
+        # the book, i.e. the side more likely to get run through next. Used ONLY as the
+        # pricing input (S_t) for the strategy's edge calculation -- realized vol,
+        # window rollover, and settlement estimation all deliberately keep using the
+        # plain mid (spot_price) since microprice is a short-horizon directional signal,
+        # not a "true price" reference.
+        pricing_spot = self.spot_feed.microprice if self.spot_feed.microprice is not None else spot_price
 
-                if window_id != self.current_window_id or self.strike_price is None:
-                    if self.strike_price is not None:
-                        # Polymarket's crypto Up/Down markets settle via a Chainlink TWAP
-                        # Data Stream (as of the Aug 2026 upgrade), not a single instantaneous
-                        # price snapshot -- so an instantaneous Binance spot read is a biased
-                        # proxy for the real settlement price. Compute trailing 30s/60s TWAPs
-                        # too (public sources disagree on the exact window) and keep all three
-                        # so post-hoc comparison against the confirmed on-chain outcome can
-                        # tell us empirically which one actually tracks Polymarket's resolution.
-                        twap_30 = self.spot_feed.get_trailing_twap(30.0)
-                        twap_60 = self.spot_feed.get_trailing_twap(60.0)
-                        best_estimate_price = twap_60 if twap_60 is not None else spot_price
+        # Trailing partial-TWAP of the current closing window's averaging period, for
+        # the Asian-option-style variance adjustment in calculate_fair_probability.
+        known_avg_price = None
+        if time_remaining_sec < TWAP_SETTLEMENT_WINDOW_SEC:
+            elapsed_in_twap_window = TWAP_SETTLEMENT_WINDOW_SEC - time_remaining_sec
+            known_avg_price = self.spot_feed.get_trailing_twap(elapsed_in_twap_window)
 
-                        realized_up_estimate = 1 if best_estimate_price >= self.strike_price else 0
-                        closing_window_ts = self.current_window_start
-                        closing_slug = self.market_feed.get_slug_for_window(closing_window_ts)
+        await self.market_feed.find_active_5min_market()
+        live_quotes = await self.market_feed.get_live_market_prices()
 
-                        self.pending_resolutions.append({
-                            "window_id": self.current_window_id,
-                            "slug": closing_slug,
-                            "strike_k": self.strike_price,
-                            "settlement_price": best_estimate_price,
-                            "binance_estimate": realized_up_estimate,
-                            "snapshot_price": spot_price,
-                            "twap_30": twap_30,
-                            "twap_60": twap_60,
-                            "queued_at": now,
-                            "last_checked": 0.0
-                        })
-                        self._save_pending_resolutions()
-                        logger.info(
-                            f"Window {self.current_window_id} closed. Queued for Polymarket on-chain resolution "
-                            f"(Slug: {closing_slug}) | snapshot=${spot_price:.2f} twap30={twap_30} twap60={twap_60}"
-                        )
+        # Pillar A: Contract Book Imbalance (CBI) from Polymarket's resting YES depth ladder
+        yes_bid_depth = sum(float(l["size"]) for l in live_quotes.get("yes_bids", []) if isinstance(l, dict) and "size" in l)
+        yes_ask_depth = sum(float(l["size"]) for l in live_quotes.get("yes_asks", []) if isinstance(l, dict) and "size" in l)
+        total_depth = yes_bid_depth + yes_ask_depth
+        cbi = (yes_bid_depth - yes_ask_depth) / total_depth if total_depth > 0 else 0.0
 
-                    self.current_window_id = window_id
-                    self.current_window_start = window_start
-                    
-                    # RECOVER EXACT WINDOW OPEN STRIKE PRICE (NO DRIFT ON RESTART)
-                    exact_open = await self.spot_feed.get_exact_window_open_price(window_start)
-                    self.strike_price = exact_open if exact_open is not None else spot_price
-                    logger.info(f"[NEW 5-MIN WINDOW] Window {window_id} Strike K initialized at ${self.strike_price:.2f}")
+        norm_momentum = max(min(momentum / 50.0, 1.0), -1.0)
+        raw_p_model, z = self.strategy.calculate_fair_probability(
+            S_t=pricing_spot,
+            K=self.strike_price,
+            tau_seconds=time_remaining_sec,
+            annualized_vol=vol_ann,
+            ofi_normalized=ofi,
+            momentum_normalized=norm_momentum,
+            cbi_normalized=cbi,
+            known_avg_price=known_avg_price,
+            twap_window_sec=TWAP_SETTLEMENT_WINDOW_SEC
+        )
 
-                try:
-                    await self._poll_deferred_resolutions()
-                except Exception as e:
-                    logger.error(f"Unexpected error in _poll_deferred_resolutions: {e}")
+        # Proposal 1: shadow/counterfactual logging. Recompute fair probability using
+        # ONLY the pre-upgrade inputs -- plain mid instead of microprice, plain trailing
+        # realized vol instead of the DVOL blend, cbi_normalized=0.0 (no CBI leakage), and
+        # known_avg_price=None to disable the TWAP/Asian-option variance adjustment -- so
+        # calibration_log.csv carries both the live model's prediction and what the bot would
+        # have priced before any upgrades.
+        p_model_shadow, _z_shadow = self.strategy.calculate_fair_probability(
+            S_t=spot_price,
+            K=self.strike_price,
+            tau_seconds=time_remaining_sec,
+            annualized_vol=raw_vol_ann,
+            ofi_normalized=ofi,
+            momentum_normalized=norm_momentum,
+            cbi_normalized=0.0,
+            known_avg_price=None,
+            twap_window_sec=TWAP_SETTLEMENT_WINDOW_SEC
+        )
 
-                try:
-                    await self._poll_fallback_reconciliation()
-                except Exception as e:
-                    logger.error(f"Unexpected error in _poll_fallback_reconciliation: {e}")
+        calibrated_p_up = self.calibrator.calibrate(raw_p_model)
 
-                time_remaining_sec = max(300.0 - (now - self.current_window_start), 1.0)
-                raw_vol_ann = self.spot_feed.annualized_vol
-                ofi = self.spot_feed.get_ofi_normalized()
-                momentum = self.spot_feed.get_momentum(lookback_seconds=10.0)
+        self.calibrator.log_observation(
+            window_id=self.current_window_id,
+            tau_sec=time_remaining_sec,
+            moneyness=spot_price / self.strike_price,
+            vol_ann=vol_ann,
+            ofi=ofi,
+            z=z,
+            p_model=raw_p_model,
+            p_market=live_quotes["yes_ask"],
+            p_model_shadow=p_model_shadow,
+            cbi=cbi
+        )
 
-                # Proposal 2: Deribit DVOL implied volatility blending
-                # DVOL is forward-looking 30-day implied vol (decimal, e.g. 0.39 for 39%).
-                # Blend 20% DVOL prior with 80% realized trailing vol when available,
-                # stabilizing vol estimation against startup noise or sudden regime shifts.
-                dvol_ann = self.deribit_feed.get_dvol()
-                if dvol_ann is not None:
-                    vol_ann = 0.80 * raw_vol_ann + 0.20 * dvol_ann
-                else:
-                    vol_ann = raw_vol_ann
+        market_info = {
+            "strike_price": self.strike_price,
+            "time_remaining_sec": time_remaining_sec,
+            "annualized_vol": vol_ann,
+            "ofi_normalized": ofi,
+            "yes_ask": live_quotes["yes_ask"],
+            "yes_bid": live_quotes["yes_bid"],
+            "no_ask": live_quotes["no_ask"],
+            "no_bid": live_quotes["no_bid"],
+            "known_avg_price": known_avg_price,
+            "twap_window_sec": TWAP_SETTLEMENT_WINDOW_SEC,
+        }
 
-                # Proposal 3: Cross-exchange composite reference price tracking
-                # Compares Binance mid against Deribit's multi-exchange composite index
-                composite_idx = self.deribit_feed.get_composite_index()
-                basis_spread = (spot_price - composite_idx) if composite_idx is not None else None
+        confidence_weight = self.calibrator.get_confidence_weight()
 
-                # Microprice (Stoikov): size-weighted mid that leans toward the thinner side of
-                # the book, i.e. the side more likely to get run through next. Used ONLY as the
-                # pricing input (S_t) for the strategy's edge calculation -- realized vol,
-                # window rollover, and settlement estimation all deliberately keep using the
-                # plain mid (spot_price) since microprice is a short-horizon directional signal,
-                # not a "true price" reference.
-                pricing_spot = self.spot_feed.microprice if self.spot_feed.microprice is not None else spot_price
+        signal = self.strategy.evaluate(
+            spot_price=pricing_spot,
+            momentum=momentum,
+            market_info=market_info,
+            order_book={"cbi": cbi, **live_quotes},
+            confidence_weight=confidence_weight
+        )
 
-                # Trailing partial-TWAP of the current closing window's averaging period, for
-                # the Asian-option-style variance adjustment in calculate_fair_probability.
-                known_avg_price = None
-                if time_remaining_sec < TWAP_SETTLEMENT_WINDOW_SEC:
-                    elapsed_in_twap_window = TWAP_SETTLEMENT_WINDOW_SEC - time_remaining_sec
-                    known_avg_price = self.spot_feed.get_trailing_twap(elapsed_in_twap_window)
+        # TRADE FUNNEL & GUARDS
+        if not signal:
+            status = "BLOCKED_NOISE" if abs(z) < self.strategy.min_abs_z else "NO_SIGNAL"
+            self.event_logger.log_event(
+                window_id=self.current_window_id,
+                tau_sec=time_remaining_sec,
+                outcome="NONE",
+                z=z,
+                p_model=calibrated_p_up,
+                direct_ask=0.0,
+                direct_spread=0.0,
+                real_edge=0.0,
+                hurdle=0.0,
+                status=status
+            )
+        else:
+            # Shrink the calibrated probability toward the market price using the same confidence weight
+            is_yes = (signal["outcome"] == "YES")
+            market_prob = live_quotes["yes_ask"] if is_yes else (1.0 - live_quotes["yes_bid"])
+            base_prob = calibrated_p_up if is_yes else (1.0 - calibrated_p_up)
+            if confidence_weight < 1.0:
+                signal["estimated_prob"] = confidence_weight * base_prob + (1.0 - confidence_weight) * market_prob
+            else:
+                signal["estimated_prob"] = base_prob
+            direct_ask = live_quotes["direct_yes_ask"] if is_yes else live_quotes["direct_no_ask"]
+            direct_bid = live_quotes["direct_yes_bid"] if is_yes else live_quotes["direct_no_bid"]
+            can_take_trades = self.risk_manager.can_trade()
 
-                await self.market_feed.find_active_5min_market()
-                live_quotes = await self.market_feed.get_live_market_prices()
+            has_position_in_window = any(
+                p["window_id"] == self.current_window_id 
+                for p in self.executor.open_paper_positions
+            )
 
-                norm_momentum = max(min(momentum / 50.0, 1.0), -1.0)
-                raw_p_model, z = self.strategy.calculate_fair_probability(
-                    S_t=pricing_spot,
-                    K=self.strike_price,
-                    tau_seconds=time_remaining_sec,
-                    annualized_vol=vol_ann,
-                    ofi_normalized=ofi,
-                    momentum_normalized=norm_momentum,
-                    known_avg_price=known_avg_price,
-                    twap_window_sec=TWAP_SETTLEMENT_WINDOW_SEC
-                )
-
-                # Proposal 1: shadow/counterfactual logging. Recompute fair probability using
-                # ONLY the pre-upgrade inputs -- plain mid instead of microprice, plain trailing
-                # realized vol instead of the DVOL blend, and known_avg_price=None to disable the
-                # TWAP/Asian-option variance adjustment -- so calibration_log.csv carries both the
-                # live model's prediction and what the bot would have priced before any of the 4
-                # upgrades shipped this session. Once enough windows have settled, comparing Brier
-                # score / log-loss of p_model vs p_model_shadow empirically proves or disproves
-                # whether these upgrades actually improved calibration, rather than assuming it.
-                p_model_shadow, _z_shadow = self.strategy.calculate_fair_probability(
-                    S_t=spot_price,
-                    K=self.strike_price,
-                    tau_seconds=time_remaining_sec,
-                    annualized_vol=raw_vol_ann,
-                    ofi_normalized=ofi,
-                    momentum_normalized=norm_momentum,
-                    known_avg_price=None,
-                    twap_window_sec=TWAP_SETTLEMENT_WINDOW_SEC
-                )
-
-                calibrated_p_up = self.calibrator.calibrate(raw_p_model)
-
-                self.calibrator.log_observation(
+            if has_position_in_window:
+                self.event_logger.log_event(
                     window_id=self.current_window_id,
                     tau_sec=time_remaining_sec,
-                    moneyness=spot_price / self.strike_price,
-                    vol_ann=vol_ann,
-                    ofi=ofi,
+                    outcome=signal["outcome"],
                     z=z,
-                    p_model=raw_p_model,
-                    p_market=live_quotes["yes_ask"],
-                    p_model_shadow=p_model_shadow
+                    p_model=signal["estimated_prob"],
+                    direct_ask=direct_ask if direct_ask else 0.0,
+                    direct_spread=0.0,
+                    real_edge=0.0,
+                    hurdle=signal["hurdle"],
+                    status="BLOCKED_WINDOW_MAX_POS"
+                )
+            elif direct_ask is None:
+                ws_connected = self.book_ws.connected if self.book_ws else False
+                target_token = self.market_feed.token_id_yes if is_yes else self.market_feed.token_id_no
+                has_fresh, age_s, has_asks = self.book_ws.get_book_meta(target_token) if self.book_ws else (False, None, False)
+                rest_backoff_active = (time.time() < self.market_feed._book_backoff_until)
+                age_str = f"{age_s:.1f}s" if age_s is not None else "no_entry"
+                logger.debug(
+                    f"[{self.asset}] BLOCKED_PHANTOM trigger: token={target_token[:12] if target_token else 'None'} "
+                    f"ws_conn={ws_connected} fresh={has_fresh} age={age_str} has_asks={has_asks} rest_backoff={rest_backoff_active}"
+                )
+                self.event_logger.log_event(
+                    window_id=self.current_window_id,
+                    tau_sec=time_remaining_sec,
+                    outcome=signal["outcome"],
+                    z=z,
+                    p_model=signal["estimated_prob"],
+                    direct_ask=0.0,
+                    direct_spread=0.0,
+                    real_edge=0.0,
+                    hurdle=signal["hurdle"],
+                    status="BLOCKED_PHANTOM"
+                )
+            else:
+                exec_price = direct_ask
+                real_edge = signal["estimated_prob"] - exec_price
+                direct_spread = (direct_ask - direct_bid) if (direct_bid is not None and direct_ask >= direct_bid) else 0.02
+                # Fee-aware hurdle using the REAL Polymarket crypto taker-fee curve
+                # (rate * (1 - price), peaks at 3.5% near 50/50) rather than the old
+                # flat 0.5% assumption -- see estimate_taker_fee_fraction() for the
+                # live-verified fee schedule this is based on.
+                direct_hurdle = max(
+                    self.strategy.min_edge,
+                    (direct_spread / 2.0) + estimate_taker_fee_fraction(exec_price) + self.strategy.slippage_buffer
                 )
 
-                market_info = {
-                    "strike_price": self.strike_price,
-                    "time_remaining_sec": time_remaining_sec,
-                    "annualized_vol": vol_ann,
-                    "ofi_normalized": ofi,
-                    "yes_ask": live_quotes["yes_ask"],
-                    "yes_bid": live_quotes["yes_bid"],
-                    "no_ask": live_quotes["no_ask"],
-                    "no_bid": live_quotes["no_bid"],
-                    "known_avg_price": known_avg_price,
-                    "twap_window_sec": TWAP_SETTLEMENT_WINDOW_SEC,
-                }
-
-                signal = self.strategy.evaluate(
-                    spot_price=pricing_spot,
-                    momentum=momentum,
-                    market_info=market_info,
-                    order_book={}
-                )
-
-                # TRADE FUNNEL & GUARDS
-                if not signal:
-                    status = "BLOCKED_NOISE" if abs(z) < self.strategy.min_abs_z else "NO_SIGNAL"
+                if real_edge <= direct_hurdle:
                     self.event_logger.log_event(
                         window_id=self.current_window_id,
                         tau_sec=time_remaining_sec,
-                        outcome="NONE",
+                        outcome=signal["outcome"],
                         z=z,
-                        p_model=calibrated_p_up,
-                        direct_ask=0.0,
-                        direct_spread=0.0,
-                        real_edge=0.0,
-                        hurdle=0.0,
-                        status=status
+                        p_model=signal["estimated_prob"],
+                        direct_ask=exec_price,
+                        direct_spread=direct_spread,
+                        real_edge=real_edge,
+                        hurdle=direct_hurdle,
+                        status="BLOCKED_HURDLE"
+                    )
+                elif self.strategy.min_entry_price is not None and exec_price < self.strategy.min_entry_price:
+                    self.event_logger.log_event(
+                        window_id=self.current_window_id,
+                        tau_sec=time_remaining_sec,
+                        outcome=signal["outcome"],
+                        z=z,
+                        p_model=signal["estimated_prob"],
+                        direct_ask=exec_price,
+                        direct_spread=direct_spread,
+                        real_edge=real_edge,
+                        hurdle=direct_hurdle,
+                        status="BLOCKED_PAYOUT_RATIO"
+                    )
+                elif self.strategy.max_entry_price is not None and exec_price > self.strategy.max_entry_price:
+                    self.event_logger.log_event(
+                        window_id=self.current_window_id,
+                        tau_sec=time_remaining_sec,
+                        outcome=signal["outcome"],
+                        z=z,
+                        p_model=signal["estimated_prob"],
+                        direct_ask=exec_price,
+                        direct_spread=direct_spread,
+                        real_edge=real_edge,
+                        hurdle=direct_hurdle,
+                        status="BLOCKED_PAYOUT_RATIO"
+                    )
+                elif confidence_weight < 0.35:
+                    self.event_logger.log_event(
+                        window_id=self.current_window_id,
+                        tau_sec=time_remaining_sec,
+                        outcome=signal["outcome"],
+                        z=z,
+                        p_model=signal["estimated_prob"],
+                        direct_ask=exec_price,
+                        direct_spread=direct_spread,
+                        real_edge=real_edge,
+                        hurdle=direct_hurdle,
+                        status="BLOCKED_CONFIDENCE"
+                    )
+                elif self.portfolio_circuit_breaker:
+                    self.event_logger.log_event(
+                        window_id=self.current_window_id,
+                        tau_sec=time_remaining_sec,
+                        outcome=signal["outcome"],
+                        z=z,
+                        p_model=signal["estimated_prob"],
+                        direct_ask=exec_price,
+                        direct_spread=direct_spread,
+                        real_edge=real_edge,
+                        hurdle=direct_hurdle,
+                        status="BLOCKED_PORTFOLIO_RISK"
+                    )
+                elif not can_take_trades:
+                    self.event_logger.log_event(
+                        window_id=self.current_window_id,
+                        tau_sec=time_remaining_sec,
+                        outcome=signal["outcome"],
+                        z=z,
+                        p_model=signal["estimated_prob"],
+                        direct_ask=exec_price,
+                        direct_spread=direct_spread,
+                        real_edge=real_edge,
+                        hurdle=direct_hurdle,
+                        status="BLOCKED_RISK"
+                    )
+                elif (now - self.last_trade_time <= 15):
+                    self.event_logger.log_event(
+                        window_id=self.current_window_id,
+                        tau_sec=time_remaining_sec,
+                        outcome=signal["outcome"],
+                        z=z,
+                        p_model=signal["estimated_prob"],
+                        direct_ask=exec_price,
+                        direct_spread=direct_spread,
+                        real_edge=real_edge,
+                        hurdle=direct_hurdle,
+                        status="BLOCKED_COOLDOWN"
                     )
                 else:
-                    signal["estimated_prob"] = calibrated_p_up if signal["outcome"] == "YES" else (1.0 - calibrated_p_up)
-                    is_yes = (signal["outcome"] == "YES")
-                    direct_ask = live_quotes["direct_yes_ask"] if is_yes else live_quotes["direct_no_ask"]
-                    direct_bid = live_quotes["direct_yes_bid"] if is_yes else live_quotes["direct_no_bid"]
-                    can_take_trades = self.risk_manager.can_trade()
-
-                    has_position_in_window = any(
-                        p["window_id"] == self.current_window_id 
-                        for p in self.executor.open_paper_positions
+                    bankroll = self.executor.simulated_balance if config.paper_trading else 500.0
+                    odds = 1.0 / max(exec_price, 0.05)
+                    size = self.risk_manager.calculate_position_size(
+                        win_probability=signal["estimated_prob"],
+                        odds=odds,
+                        bankroll=bankroll
                     )
 
-                    if has_position_in_window:
-                        self.event_logger.log_event(
-                            window_id=self.current_window_id,
-                            tau_sec=time_remaining_sec,
-                            outcome=signal["outcome"],
-                            z=z,
-                            p_model=signal["estimated_prob"],
-                            direct_ask=direct_ask if direct_ask else 0.0,
-                            direct_spread=0.0,
-                            real_edge=0.0,
-                            hurdle=signal["hurdle"],
-                            status="BLOCKED_WINDOW_MAX_POS"
-                        )
-                    elif direct_ask is None:
-                        self.event_logger.log_event(
-                            window_id=self.current_window_id,
-                            tau_sec=time_remaining_sec,
-                            outcome=signal["outcome"],
-                            z=z,
-                            p_model=signal["estimated_prob"],
-                            direct_ask=0.0,
-                            direct_spread=0.0,
-                            real_edge=0.0,
-                            hurdle=signal["hurdle"],
-                            status="BLOCKED_PHANTOM"
-                        )
-                    else:
-                        exec_price = direct_ask
-                        real_edge = signal["estimated_prob"] - exec_price
-                        direct_spread = (direct_ask - direct_bid) if (direct_bid is not None and direct_ask >= direct_bid) else 0.02
-                        # Fee-aware hurdle using the REAL Polymarket crypto taker-fee curve
-                        # (rate * (1 - price), peaks at 3.5% near 50/50) rather than the old
-                        # flat 0.5% assumption -- see estimate_taker_fee_fraction() for the
-                        # live-verified fee schedule this is based on.
-                        direct_hurdle = max(
-                            self.strategy.min_edge,
-                            (direct_spread / 2.0) + estimate_taker_fee_fraction(exec_price) + self.strategy.slippage_buffer
-                        )
+                    if size > 0:
+                        # Proposal 3: Order-Book Depth & Realistic Book Walking
+                        # Walk the direct ask order book to obtain the true VWAP fill price across depth
+                        target_asks = live_quotes.get("yes_asks" if is_yes else "no_asks", [])
+                        vwap_price, total_cost, total_shares = self.market_feed.simulate_walk_book(target_asks, size)
 
-                        if real_edge <= direct_hurdle:
+                        if vwap_price is None:
+                            # Book lacks depth to fill requested size; avoid phantom fills.
+                            # NOTE: deliberately no `continue` here -- this sits inside the main
+                            # 1s tick loop, and a bare `continue` would skip straight back to
+                            # `while True`, silently swallowing the periodic status-line /
+                            # ETH-SOL-DVOL telemetry block below for that tick. That's exactly
+                            # the wrong failure mode: thin resting depth (which triggers this
+                            # branch) is precisely when that telemetry is most useful to see.
+                            # Verified live: a bare `continue` here made the status line vanish
+                            # for stretches whenever signals kept hitting BLOCKED_PHANTOM/HURDLE.
                             self.event_logger.log_event(
                                 window_id=self.current_window_id,
                                 tau_sec=time_remaining_sec,
@@ -751,176 +878,412 @@ class Polymarket5mBot:
                                 direct_spread=direct_spread,
                                 real_edge=real_edge,
                                 hurdle=direct_hurdle,
-                                status="BLOCKED_HURDLE"
-                            )
-                        elif not can_take_trades:
-                            self.event_logger.log_event(
-                                window_id=self.current_window_id,
-                                tau_sec=time_remaining_sec,
-                                outcome=signal["outcome"],
-                                z=z,
-                                p_model=signal["estimated_prob"],
-                                direct_ask=exec_price,
-                                direct_spread=direct_spread,
-                                real_edge=real_edge,
-                                hurdle=direct_hurdle,
-                                status="BLOCKED_RISK"
-                            )
-                        elif (now - self.last_trade_time <= 15):
-                            self.event_logger.log_event(
-                                window_id=self.current_window_id,
-                                tau_sec=time_remaining_sec,
-                                outcome=signal["outcome"],
-                                z=z,
-                                p_model=signal["estimated_prob"],
-                                direct_ask=exec_price,
-                                direct_spread=direct_spread,
-                                real_edge=real_edge,
-                                hurdle=direct_hurdle,
-                                status="BLOCKED_COOLDOWN"
+                                status="BLOCKED_PHANTOM",
+                                size_usd=0.0
                             )
                         else:
-                            bankroll = self.executor.simulated_balance if config.paper_trading else 500.0
-                            odds = 1.0 / max(exec_price, 0.05)
-                            size = self.risk_manager.calculate_position_size(
-                                win_probability=signal["estimated_prob"],
-                                odds=odds,
-                                bankroll=bankroll
+                            # Re-verify edge against VWAP fill price after slippage.
+                            # Recompute the fee-aware hurdle at the ACTUAL vwap fill
+                            # price too -- walking deeper into the book to fill size
+                            # can land at a materially different price than direct_ask,
+                            # and the real taker fee (rate * (1-price)) moves with it.
+                            vwap_edge = signal["estimated_prob"] - vwap_price
+                            vwap_hurdle = max(
+                                self.strategy.min_edge,
+                                (direct_spread / 2.0) + estimate_taker_fee_fraction(vwap_price) + self.strategy.slippage_buffer
                             )
-
-                            if size > 0:
-                                # Proposal 3: Order-Book Depth & Realistic Book Walking
-                                # Walk the direct ask order book to obtain the true VWAP fill price across depth
-                                target_asks = live_quotes.get("yes_asks" if is_yes else "no_asks", [])
-                                vwap_price, total_cost, total_shares = self.market_feed.simulate_walk_book(target_asks, size)
-
-                                if vwap_price is None:
-                                    # Book lacks depth to fill requested size; avoid phantom fills.
-                                    # NOTE: deliberately no `continue` here -- this sits inside the main
-                                    # 1s tick loop, and a bare `continue` would skip straight back to
-                                    # `while True`, silently swallowing the periodic status-line /
-                                    # ETH-SOL-DVOL telemetry block below for that tick. That's exactly
-                                    # the wrong failure mode: thin resting depth (which triggers this
-                                    # branch) is precisely when that telemetry is most useful to see.
-                                    # Verified live: a bare `continue` here made the status line vanish
-                                    # for stretches whenever signals kept hitting BLOCKED_PHANTOM/HURDLE.
-                                    self.event_logger.log_event(
-                                        window_id=self.current_window_id,
-                                        tau_sec=time_remaining_sec,
-                                        outcome=signal["outcome"],
-                                        z=z,
-                                        p_model=signal["estimated_prob"],
-                                        direct_ask=exec_price,
-                                        direct_spread=direct_spread,
-                                        real_edge=real_edge,
-                                        hurdle=direct_hurdle,
-                                        status="BLOCKED_PHANTOM",
-                                        size_usd=0.0
-                                    )
-                                else:
-                                    # Re-verify edge against VWAP fill price after slippage.
-                                    # Recompute the fee-aware hurdle at the ACTUAL vwap fill
-                                    # price too -- walking deeper into the book to fill size
-                                    # can land at a materially different price than direct_ask,
-                                    # and the real taker fee (rate * (1-price)) moves with it.
-                                    vwap_edge = signal["estimated_prob"] - vwap_price
-                                    vwap_hurdle = max(
-                                        self.strategy.min_edge,
-                                        (direct_spread / 2.0) + estimate_taker_fee_fraction(vwap_price) + self.strategy.slippage_buffer
-                                    )
-                                    if vwap_edge <= vwap_hurdle:
-                                        self.event_logger.log_event(
-                                            window_id=self.current_window_id,
-                                            tau_sec=time_remaining_sec,
-                                            outcome=signal["outcome"],
-                                            z=z,
-                                            p_model=signal["estimated_prob"],
-                                            direct_ask=vwap_price,
-                                            direct_spread=direct_spread,
-                                            real_edge=vwap_edge,
-                                            hurdle=vwap_hurdle,
-                                            status="BLOCKED_HURDLE",
-                                            size_usd=0.0
-                                        )
-                                    else:
-                                        token_target = self.market_feed.token_id_yes if is_yes else (self.market_feed.token_id_no or "token_no")
-                                        active_slug = self.market_feed.get_slug_for_window(self.current_window_start)
-                                        await self.executor.execute_trade(
-                                            window_id=self.current_window_id,
-                                            slug=active_slug,
-                                            token_id=token_target or "clob_token_default",
-                                            outcome=signal["outcome"],
-                                            amount_usd=size,
-                                            price=vwap_price
-                                        )
-                                        self.last_trade_time = now
-
-                                        if config.notify_on_trade:
-                                            notifier.alert(
-                                                f"\U0001F4C8 TRADE: {signal['outcome']} on window {self.current_window_id} "
-                                                f"({active_slug}) | ${size:.2f} @ {vwap_price:.3f} | "
-                                                f"model p={signal['estimated_prob']*100:.1f}% edge={vwap_edge*100:+.2f}% "
-                                                f"| cash=${self.executor.simulated_balance:.2f}"
-                                            )
-
-                                        self.event_logger.log_event(
-                                            window_id=self.current_window_id,
-                                            tau_sec=time_remaining_sec,
-                                            outcome=signal["outcome"],
-                                            z=z,
-                                            p_model=signal["estimated_prob"],
-                                            direct_ask=vwap_price,
-                                            direct_spread=direct_spread,
-                                            real_edge=vwap_edge,
-                                            hurdle=vwap_hurdle,
-                                            status="EXECUTED",
-                                            size_usd=size
-                                        )
-                            else:
+                            if vwap_edge <= vwap_hurdle:
                                 self.event_logger.log_event(
                                     window_id=self.current_window_id,
                                     tau_sec=time_remaining_sec,
                                     outcome=signal["outcome"],
                                     z=z,
                                     p_model=signal["estimated_prob"],
-                                    direct_ask=exec_price,
+                                    direct_ask=vwap_price,
                                     direct_spread=direct_spread,
-                                    real_edge=real_edge,
-                                    hurdle=direct_hurdle,
-                                    status="BLOCKED_KELLY_ZERO",
+                                    real_edge=vwap_edge,
+                                    hurdle=vwap_hurdle,
+                                    status="BLOCKED_HURDLE",
                                     size_usd=0.0
                                 )
+                            else:
+                                token_target = self.market_feed.token_id_yes if is_yes else (self.market_feed.token_id_no or "token_no")
+                                active_slug = self.market_feed.get_slug_for_window(self.current_window_start)
+                                exec_result = await self.executor.execute_trade(
+                                    window_id=self.current_window_id,
+                                    slug=active_slug,
+                                    token_id=token_target or "clob_token_default",
+                                    outcome=signal["outcome"],
+                                    amount_usd=size,
+                                    price=vwap_price
+                                )
 
-                if int(now) % 10 == 0:
-                    book_type = "LIVE" if live_quotes.get("is_live_book") else "SYNTH"
-                    dir_y = f"{live_quotes['direct_yes_ask']:.2f}" if live_quotes['direct_yes_ask'] else "None"
-                    dir_n = f"{live_quotes['direct_no_ask']:.2f}" if live_quotes['direct_no_ask'] else "None"
-                    pending_count = len(self.pending_resolutions)
-                    can_trade_now = self.risk_manager.can_trade()
-                    status_str = "ACTIVE" if can_trade_now else "HALTED"
-                    basis_str = f"Basis: {basis_spread:+.2f}" if basis_spread is not None else "Basis: N/A"
-                    dvol_str = f"DVOL: {dvol_ann*100:.1f}%" if dvol_ann is not None else "DVOL: N/A"
-                    eth_state = self.multi_asset_feed.get_market_state("eth")
-                    sol_state = self.multi_asset_feed.get_market_state("sol")
-                    eth_p = f"{eth_state['p_implied']:.2f}" if eth_state.get("p_implied") is not None else "N/A"
-                    sol_p = f"{sol_state['p_implied']:.2f}" if sol_state.get("p_implied") is not None else "N/A"
-                    multi_str = f"ETH(P): {eth_p} | SOL(P): {sol_p}"
+                                if exec_result.get("status") == "BLOCKED_INSUFFICIENT_FUNDS":
+                                    self.event_logger.log_event(
+                                        window_id=self.current_window_id,
+                                        tau_sec=time_remaining_sec,
+                                        outcome=signal["outcome"],
+                                        z=z,
+                                        p_model=signal["estimated_prob"],
+                                        direct_ask=vwap_price,
+                                        direct_spread=direct_spread,
+                                        real_edge=vwap_edge,
+                                        hurdle=vwap_hurdle,
+                                        status="BLOCKED_FUNDS",
+                                        size_usd=0.0
+                                    )
+                                else:
+                                    self.last_trade_time = now
 
-                    logger.info(
-                        f"Spot: ${spot_price:.2f} | K: ${self.strike_price:.2f} | "
-                        f"Tau: {time_remaining_sec:.0f}s | Vol: {vol_ann*100:.1f}% ({dvol_str}) | "
-                        f"{basis_str} | {multi_str} | OFI: {ofi:+.2f} | z: {z:+.2f} | P(up): {calibrated_p_up*100:.1f}% | "
-                        f"Trade: [{status_str}] | Cash: ${self.executor.simulated_balance:.2f} | Day PnL: {self.risk_manager.daily_pnl:+.2f} USD | Pending Res: {pending_count}"
+                                    if config.notify_on_trade:
+                                        notifier.alert(
+                                            f"\U0001F4C8 TRADE [{self.asset}]: {signal['outcome']} on window {self.current_window_id} "
+                                            f"({active_slug}) | ${size:.2f} @ {vwap_price:.3f} | "
+                                            f"model p={signal['estimated_prob']*100:.1f}% edge={vwap_edge*100:+.2f}% "
+                                            f"| cash=${self.executor.simulated_balance:.2f}"
+                                        )
+
+                                    self.event_logger.log_event(
+                                        window_id=self.current_window_id,
+                                        tau_sec=time_remaining_sec,
+                                        outcome=signal["outcome"],
+                                        z=z,
+                                        p_model=signal["estimated_prob"],
+                                        direct_ask=vwap_price,
+                                        direct_spread=direct_spread,
+                                        real_edge=vwap_edge,
+                                        hurdle=vwap_hurdle,
+                                        status="EXECUTED",
+                                        size_usd=size
+                                    )
+                    else:
+                        self.event_logger.log_event(
+                            window_id=self.current_window_id,
+                            tau_sec=time_remaining_sec,
+                            outcome=signal["outcome"],
+                            z=z,
+                            p_model=signal["estimated_prob"],
+                            direct_ask=exec_price,
+                            direct_spread=direct_spread,
+                            real_edge=real_edge,
+                            hurdle=direct_hurdle,
+                            status="BLOCKED_KELLY_ZERO",
+                            size_usd=0.0
+                        )
+
+        pending_count = len(self.pending_resolutions)
+        can_trade_now = self.risk_manager.can_trade() and not self.portfolio_circuit_breaker
+        if self.portfolio_circuit_breaker:
+            status_str = 'PORTFOLIO_HALTED'
+        elif not self.risk_manager.can_trade():
+            status_str = 'HALTED'
+        elif confidence_weight < 0.35:
+            status_str = 'LOW_CONFIDENCE_PAUSED'
+        else:
+            status_str = 'ACTIVE'
+        basis_str = f"Basis: {basis_spread:+.2f}" if basis_spread is not None else "Basis: N/A"
+        dvol_str = f"DVOL: {dvol_ann*100:.1f}%" if dvol_ann is not None else "DVOL: N/A"
+
+        logger.info(
+            f"[{self.asset}] Spot: ${spot_price:.2f} | K: ${self.strike_price:.2f} | "
+            f"Tau: {time_remaining_sec:.0f}s | Vol: {vol_ann*100:.1f}% ({dvol_str}) | "
+            f"{basis_str} | OFI: {ofi:+.2f} | z: {z:+.2f} | P(up): {calibrated_p_up*100:.1f}% | "
+            f"Conf: {confidence_weight:.2f} | "
+            f"Trade: [{status_str}] | Cash: ${self.executor.simulated_balance:.2f} | Day PnL: {self.risk_manager.daily_pnl:+.2f} USD | Pending Res: {pending_count}"
+        )
+
+class Polymarket5mBot:
+    def __init__(self):
+        self.strategies = {
+            asset: ClaudQuantBinaryOptionStrategy(
+                min_edge=0.045 if asset == "ETH" else 0.03,
+                slippage_buffer=config.slippage_tolerance,
+                min_abs_z=0.50 if asset == "ETH" else 0.40,
+                min_strike_distance_pct=0.0005 if asset == "ETH" else 0.0003,
+                tail_dof=4.5 if asset in ("ETH", "SOL") else None,
+                min_entry_price=0.333 if asset == "BTC" else None,
+                max_entry_price=0.50 if asset == "BTC" else None,
+            )
+            for asset in config.target_assets
+        }
+        self.book_ws = PolymarketBookWS()
+        self.target_assets = config.target_assets
+        self.engines: Dict[str, AssetTradingEngine] = {
+            asset: AssetTradingEngine(asset=asset, shared_book_ws=self.book_ws, strategy=self.strategies[asset])
+            for asset in self.target_assets
+        }
+        self.portfolio_state_file = "data/risk_state_portfolio.json"
+        self.max_portfolio_daily_loss_usd = config.max_portfolio_daily_loss_usd
+        self.portfolio_circuit_breaker = False
+        self.current_portfolio_day = str(datetime.datetime.now(datetime.timezone.utc).date())
+
+        # Phase 1: Portfolio Max-Drawdown Breaker (Hard stop at total_starting_balance * (1 - max_portfolio_drawdown_pct))
+        # Unlike daily circuit breaker, this persists permanently until manually cleared.
+        self.drawdown_state_file = "data/risk_state_drawdown.json"
+        num_engines = len(self.target_assets)
+        self.starting_balance_usd = config.starting_balance_usd * num_engines
+        self.max_drawdown_floor_usd = self.starting_balance_usd * (1.0 - config.max_portfolio_drawdown_pct)
+        self.drawdown_breaker_triggered = False
+
+        self._load_portfolio_state()
+        self._load_drawdown_state()
+
+    def _load_drawdown_state(self):
+        if os.path.exists(self.drawdown_state_file):
+            try:
+                with open(self.drawdown_state_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.drawdown_breaker_triggered = bool(data.get("circuit_breaker_triggered", False))
+                if self.drawdown_breaker_triggered:
+                    for engine in self.engines.values():
+                        engine.portfolio_circuit_breaker = True
+                    logger.critical(
+                        f"RiskManager [DRAWDOWN]: Restored PERMANENT TRIPPED state from {self.drawdown_state_file}. "
+                        f"Portfolio balance breached drawdown floor (${self.max_drawdown_floor_usd:.2f}). "
+                        f"All new trade entries halted until manual reset."
                     )
+            except Exception as e:
+                logger.warning(f"RiskManager [DRAWDOWN]: Failed to load state ({e}).")
 
+    def _save_drawdown_state(self, current_balance: float):
+        try:
+            os.makedirs(os.path.dirname(self.drawdown_state_file), exist_ok=True)
+            tmp_file = f"{self.drawdown_state_file}.tmp"
+            payload = {
+                "starting_balance_usd": self.starting_balance_usd,
+                "drawdown_floor_usd": self.max_drawdown_floor_usd,
+                "current_simulated_balance": current_balance,
+                "circuit_breaker_triggered": self.drawdown_breaker_triggered,
+                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+            }
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp_file, self.drawdown_state_file)
+        except Exception as e:
+            logger.error(f"RiskManager [DRAWDOWN]: Failed to atomically save state: {e}")
+
+    def _load_portfolio_state(self):
+        if os.path.exists(self.portfolio_state_file):
+            try:
+                with open(self.portfolio_state_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                today_str = str(datetime.datetime.now(datetime.timezone.utc).date())
+                saved_day = data.get("current_day")
+                if saved_day == today_str:
+                    self.current_portfolio_day = today_str
+                    self.portfolio_circuit_breaker = bool(data.get("circuit_breaker_triggered", False))
+                    for engine in self.engines.values():
+                        engine.portfolio_circuit_breaker = self.portfolio_circuit_breaker or self.drawdown_breaker_triggered
+                    if self.portfolio_circuit_breaker:
+                        logger.critical(
+                            f"RiskManager [PORTFOLIO]: Restored TRIPPED state from {self.portfolio_state_file}. "
+                            f"All new trade entries remain halted."
+                        )
+                else:
+                    self.current_portfolio_day = today_str
+                    self.portfolio_circuit_breaker = False
+                    for engine in self.engines.values():
+                        engine.portfolio_circuit_breaker = self.drawdown_breaker_triggered
+                    self._save_portfolio_state()
+            except Exception as e:
+                logger.warning(f"RiskManager [PORTFOLIO]: Failed to load state ({e}). Starting fresh.")
+                self._save_portfolio_state()
+        else:
+            self._save_portfolio_state()
+
+    def _save_portfolio_state(self):
+        try:
+            os.makedirs(os.path.dirname(self.portfolio_state_file), exist_ok=True)
+            tmp_file = f"{self.portfolio_state_file}.tmp"
+            total_pnl = sum(eng.risk_manager.daily_pnl for eng in self.engines.values())
+            payload = {
+                "current_day": self.current_portfolio_day,
+                "daily_pnl": total_pnl,
+                "max_portfolio_daily_loss_usd": self.max_portfolio_daily_loss_usd,
+                "circuit_breaker_triggered": self.portfolio_circuit_breaker,
+                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
+            }
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp_file, self.portfolio_state_file)
+        except Exception as e:
+            logger.error(f"RiskManager [PORTFOLIO]: Failed to atomically save state: {e}")
+
+    def check_portfolio_risk(self):
+        # 1. Check Permanent Max Drawdown Breaker (25% of aggregate starting capital across all engines)
+        # Sums simulated_balance across all asset executors (BTC, ETH, SOL)
+        current_balance = sum(eng.executor.simulated_balance for eng in self.engines.values()) if self.engines else self.starting_balance_usd
+        
+        if not self.drawdown_breaker_triggered:
+            if current_balance <= self.max_drawdown_floor_usd:
+                self.drawdown_breaker_triggered = True
+                for engine in self.engines.values():
+                    engine.portfolio_circuit_breaker = True
+                logger.critical(
+                    f"🚨 [PORTFOLIO MAX DRAWDOWN BREAKER TRIPPED] Balance ${current_balance:.2f} "
+                    f"breached -25% capital floor (${self.max_drawdown_floor_usd:.2f} of ${self.starting_balance_usd:.2f}). "
+                    f"PERMANENTLY HALTING ALL TRADES. Requires manual clear."
+                )
+                if config.notify_on_trade:
+                    notifier.alert(
+                        f"🚨 PORTFOLIO MAX DRAWDOWN BREAKER TRIPPED! Cash: ${current_balance:.2f} <= floor ${self.max_drawdown_floor_usd:.2f}."
+                    )
+                self._save_drawdown_state(current_balance)
+
+        today_str = str(datetime.datetime.now(datetime.timezone.utc).date())
+        
+        # Day rollover check mirroring RiskManager._check_day_rollover()
+        if today_str != self.current_portfolio_day:
+            logger.info(
+                f"RiskManager [PORTFOLIO]: Day rollover from {self.current_portfolio_day} to {today_str}. "
+                f"Resetting daily portfolio circuit breaker."
+            )
+            self.current_portfolio_day = today_str
+            self.portfolio_circuit_breaker = False
+            for engine in self.engines.values():
+                engine.portfolio_circuit_breaker = self.drawdown_breaker_triggered
+            self._save_portfolio_state()
+            return
+
+        total_pnl = sum(eng.risk_manager.daily_pnl for eng in self.engines.values())
+
+        if not self.portfolio_circuit_breaker:
+            if total_pnl <= -self.max_portfolio_daily_loss_usd:
+                self.portfolio_circuit_breaker = True
+                for engine in self.engines.values():
+                    engine.portfolio_circuit_breaker = True
+                logger.critical(
+                    f"🚨 [PORTFOLIO CIRCUIT BREAKER TRIPPED] Aggregate daily loss across all assets "
+                    f"reached {total_pnl:.2f} USD (limit: -${self.max_portfolio_daily_loss_usd:.2f}). "
+                    f"HALTING ALL NEW TRADES ACROSS ALL ASSETS FOR TODAY."
+                )
+                if config.notify_on_trade:
+                    notifier.alert(
+                        f"🚨 PORTFOLIO CIRCUIT BREAKER TRIPPED! Combined loss: ${total_pnl:.2f} USD. "
+                        f"All asset engines halted."
+                    )
+                self._save_portfolio_state()
+
+    async def run(self):
+        assets_str = ", ".join(self.target_assets)
+        logger.info(f"Starting Polymarket 5-Minute Multi-Asset Bot for: {assets_str}")
+        logger.info(f"Mode: {'[PAPER TRADING]' if config.paper_trading else '[LIVE EXECUTION]'}")
+
+        all_ok = True
+        for asset, engine in self.engines.items():
+            try:
+                reachable = await engine.market_feed.check_connectivity()
+                if not reachable:
+                    all_ok = False
+                    logger.warning(f"Polymarket API connectivity check FAILED for {asset}.")
+            except Exception as e:
+                logger.error(f"Error during connectivity check for {asset}: {e}")
+                all_ok = False
+
+        if not all_ok:
+            if config.notify_on_connectivity_failure:
+                notifier.alert(
+                    "🔴 Polymarket5mBot: Connectivity check failed for one or more assets."
+                )
+        elif config.notify_on_startup:
+            notifier.alert(
+                f"✅ Polymarket5mBot started ({'PAPER TRADING' if config.paper_trading else 'LIVE'}) "
+                f"| Assets: {assets_str} | Polymarket connectivity OK."
+            )
+
+        self.book_ws.start()
+        for engine in self.engines.values():
+            engine.spot_task = asyncio.create_task(engine.spot_feed.start())
+            if engine.deribit_feed is not None:
+                engine.deribit_task = asyncio.create_task(engine.deribit_feed.start())
+            await engine._recover_orphaned_windows()
+
+        ticker_task = asyncio.create_task(self._console_ticker())
+        portfolio_risk_task = asyncio.create_task(self._portfolio_risk_loop())
+        engine_tasks = [asyncio.create_task(self._run_engine_loop(engine)) for engine in self.engines.values()]
+
+        try:
+            await asyncio.gather(*engine_tasks)
         except asyncio.CancelledError:
             logger.info("Bot shutting down...")
         finally:
-            self.spot_feed.stop()
-            await self.deribit_feed.stop()
-            await self.multi_asset_feed.stop()
+            ticker_task.cancel()
+            portfolio_risk_task.cancel()
+            for task in engine_tasks:
+                task.cancel()
+            for engine in self.engines.values():
+                engine.spot_feed.stop()
+                if engine.spot_task is not None:
+                    engine.spot_task.cancel()
+                if engine.deribit_feed is not None:
+                    await engine.deribit_feed.stop()
+                if engine.deribit_task is not None:
+                    engine.deribit_task.cancel()
+                await engine.market_feed.close()
+            await self.book_ws.stop()
             await notifier.close()
-            spot_task.cancel()
-            deribit_task.cancel()
-            multi_asset_task.cancel()
-            await self.market_feed.close()
+
+    async def _portfolio_risk_loop(self):
+        while True:
+            try:
+                self.check_portfolio_risk()
+            except Exception as e:
+                logger.error(f"Error in portfolio risk monitor: {e}")
+            await asyncio.sleep(1)
+
+    async def _run_engine_loop(self, engine: AssetTradingEngine):
+        while True:
+            try:
+                await engine.tick()
+            except Exception as e:
+                logger.error(f"Unexpected error in engine loop [{engine.asset}]: {type(e).__name__}: {e}")
+            await asyncio.sleep(1)
+
+    async def _console_ticker(self):
+        while True:
+            await asyncio.sleep(0.1)
+            try:
+                parts = []
+                now = time.time()
+                for asset, engine in self.engines.items():
+                    spot = engine.spot_feed.latest_price
+                    k = engine.strike_price
+                    if spot is None or k is None:
+                        continue
+                    tau = max(0.0, engine.current_window_start + 300 - now)
+                    yes_book = self.book_ws.get_book(engine.market_feed.token_id_yes)
+                    no_book = self.book_ws.get_book(engine.market_feed.token_id_no)
+                    yes_ask = f"{yes_book['best_ask']:.2f}" if yes_book and yes_book.get('best_ask') is not None else "..."
+                    no_ask = f"{no_book['best_ask']:.2f}" if no_book and no_book.get('best_ask') is not None else "..."
+                    parts.append(f"{asset}: ${spot:,.1f} (K:${k:,.1f}|t:{tau:.0f}s|Y:{yes_ask}|N:{no_ask})")
+                if parts:
+                    line = "  [live] " + " | ".join(parts) + "   "
+                    print(f"\r{line}", end="", flush=True)
+            except Exception:
+                continue
+
+if __name__ == "__main__":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+    logger.remove()
+    logger.add(sys.stdout, format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{message}</cyan>", level="INFO")
+    logger.add("logs/bot_{time:YYYY-MM-DD}.log", rotation="00:00", retention="14 days", level="DEBUG", encoding="utf-8")
+
+    bot = Polymarket5mBot()
+    try:
+        asyncio.run(bot.run())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
+    except Exception as e:
+        logger.error(f"Bot crashed: {type(e).__name__}: {e}")
+        if config.notify_on_crash:
+            try:
+                asyncio.run(notifier.alert_and_wait(f"\U0001F480 Polymarket5mBot CRASHED: {type(e).__name__}: {e}"))
+            except Exception:
+                pass
+        raise
+

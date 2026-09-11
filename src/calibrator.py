@@ -4,6 +4,8 @@ import time
 from typing import Optional, List, Tuple, Dict, Any
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
+from scipy.special import logit, expit
 from loguru import logger
 
 LOG_FILE = "data/calibration_log.csv"
@@ -24,7 +26,10 @@ class EmpiricalCalibrator:
         self.observations_path = observations_path
         self.pending_window_observations: List[Dict[str, Any]] = []
         self.isotonic_model: Optional[IsotonicRegression] = None
+        self.platt_model: Optional[LogisticRegression] = None
+        self.calibration_method: str = "none"
         self.is_fitted = False
+        self._last_obs_save_time: float = 0.0
 
         # pending_window_observations used to be in-memory only, which meant every
         # in-flight window's tick history was silently discarded on restart -- the
@@ -42,10 +47,11 @@ class EmpiricalCalibrator:
                 writer = csv.writer(f)
                 writer.writerow([
                     "timestamp", "window_id", "tau_sec", "moneyness", "vol_annualized",
-                    "ofi", "z", "p_model", "p_model_shadow", "p_market", "realized_up"
+                    "ofi", "cbi", "z", "p_model", "p_model_shadow", "p_market", "realized_up"
                 ])
         else:
             self._migrate_add_shadow_column()
+            self._migrate_add_cbi_column()
 
     def _migrate_add_shadow_column(self):
         """
@@ -82,6 +88,36 @@ class EmpiricalCalibrator:
         except Exception as e:
             logger.error(f"Failed to migrate calibration_log.csv for p_model_shadow column: {e}")
 
+    def _migrate_add_cbi_column(self):
+        """
+        Adds the cbi (Contract Book Imbalance) column to calibration_log.csv if missing.
+        """
+        try:
+            with open(self.log_path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+            if not rows:
+                return
+            header = rows[0]
+            if "cbi" in header:
+                return
+            ofi_idx = header.index("ofi") if "ofi" in header else 5
+            new_header = header[:ofi_idx + 1] + ["cbi"] + header[ofi_idx + 1:]
+            new_rows = [new_header]
+            for row in rows[1:]:
+                if not row:
+                    continue
+                new_rows.append(row[:ofi_idx + 1] + ["0.0"] + row[ofi_idx + 1:])
+            with open(self.log_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerows(new_rows)
+            logger.info(
+                f"Calibrator: Migrated calibration_log.csv to include cbi column "
+                f"({len(new_rows) - 1} existing rows backfilled with 0.0)."
+            )
+        except Exception as e:
+            logger.error(f"Failed to migrate calibration_log.csv for cbi column: {e}")
+
     def _load_pending_observations(self):
         if os.path.exists(self.observations_path):
             try:
@@ -113,7 +149,8 @@ class EmpiricalCalibrator:
         z: float,
         p_model: float,
         p_market: float,
-        p_model_shadow: Optional[float] = None
+        p_model_shadow: Optional[float] = None,
+        cbi: float = 0.0
     ):
         obs = {
             "timestamp": time.time(),
@@ -122,13 +159,17 @@ class EmpiricalCalibrator:
             "moneyness": round(moneyness, 6),
             "vol_annualized": round(vol_ann, 4),
             "ofi": round(ofi, 4),
+            "cbi": round(cbi, 4),
             "z": round(z, 4),
             "p_model": round(p_model, 4),
             "p_model_shadow": round(p_model_shadow, 4) if p_model_shadow is not None else "",
             "p_market": round(p_market, 4),
         }
         self.pending_window_observations.append(obs)
-        self._save_pending_observations()
+        now = time.time()
+        if now - self._last_obs_save_time >= 5.0:
+            self._save_pending_observations()
+            self._last_obs_save_time = now
 
     def resolve_window(self, window_id: int, strike_k: float, settlement_price: float):
         realized_up = 1 if settlement_price >= strike_k else 0
@@ -153,6 +194,7 @@ class EmpiricalCalibrator:
                         o["moneyness"],
                         o["vol_annualized"],
                         o["ofi"],
+                        o.get("cbi", 0.0),
                         o["z"],
                         o["p_model"],
                         o.get("p_model_shadow", ""),
@@ -251,17 +293,96 @@ class EmpiricalCalibrator:
             X = np.array(X_samples)
             y = np.array(y_samples)
             
-            self.isotonic_model = IsotonicRegression(y_min=0.05, y_max=0.95, out_of_bounds="clip")
-            self.isotonic_model.fit(X, y)
-            self.is_fitted = True
-            logger.info(f"Isotonic calibration fitted on {distinct_windows} independent windows (Sample size: {len(X_samples)}).")
+            # Platt (logistic/sigmoid, 2-parameter) scaling prevents overfitting on small datasets (<300 windows).
+            # Switch to non-parametric IsotonicRegression once sample size is sufficiently large (>=300 windows).
+            if distinct_windows < 300:
+                p_clamped = np.clip(X, 1e-4, 1.0 - 1e-4)
+                X_logit = logit(p_clamped).reshape(-1, 1)
+                clf = LogisticRegression(C=1.0, solver="lbfgs")
+                clf.fit(X_logit, y)
+                self.platt_model = clf
+                self.isotonic_model = None
+                self.calibration_method = "platt"
+                self.is_fitted = True
+                logger.info(f"Platt (sigmoid) calibration fitted on {distinct_windows} independent windows (Sample size: {len(X_samples)}).")
+            else:
+                self.isotonic_model = IsotonicRegression(y_min=0.05, y_max=0.95, out_of_bounds="clip")
+                self.isotonic_model.fit(X, y)
+                self.platt_model = None
+                self.calibration_method = "isotonic"
+                self.is_fitted = True
+                logger.info(f"Isotonic calibration fitted on {distinct_windows} independent windows (Sample size: {len(X_samples)}).")
             return True
         except Exception as e:
-            logger.error(f"Failed to fit isotonic calibrator: {e}")
+            logger.error(f"Failed to fit calibrator: {e}")
             return False
 
     def calibrate(self, p_model: float) -> float:
-        """Applies empirical isotonic correction only when safely fitted on 30+ distinct windows."""
-        if self.is_fitted and self.isotonic_model:
-            return float(self.isotonic_model.predict([p_model])[0])
+        """Applies empirical Platt or isotonic correction only when safely fitted on 30+ distinct windows."""
+        if not self.is_fitted:
+            return p_model
+        try:
+            if self.calibration_method == "platt" and self.platt_model is not None:
+                p_clamped = max(min(p_model, 1.0 - 1e-4), 1e-4)
+                x_val = logit(np.array([[p_clamped]]))
+                prob_up = float(self.platt_model.predict_proba(x_val)[0, 1])
+                return max(min(prob_up, 0.95), 0.05)
+            elif self.calibration_method == "isotonic" and self.isotonic_model is not None:
+                return float(self.isotonic_model.predict([p_model])[0])
+        except Exception as e:
+            logger.warning(f"Calibration predict failed, using raw p_model: {e}")
         return p_model
+
+    def get_confidence_weight(self, min_windows: int = 30, rolling_window: int = 100, k: float = 8.0) -> float:
+        """
+        Compares model Brier score vs market Brier score over the most recent
+        `rolling_window` distinct settled windows (all available if fewer).
+        Returns a weight in [0,1]: 1.0 = fully trust the model's own probability,
+        0.0 = fully defer to the market's own implied probability. Requires at
+        least `min_windows` distinct settled windows before shrinking at all --
+        returns 1.0 below that threshold so early noise can't neuter the model.
+        Uses the SAME representative-row-per-window selection (closest tau to
+        150s) as fit_calibration_curve(), for consistency.
+        """
+        if not os.path.exists(self.log_path):
+            return 1.0
+        try:
+            window_groups: Dict[str, List[Dict[str, Any]]] = {}
+            with open(self.log_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    r_up = row.get("realized_up")
+                    if r_up in ("0", "1"):
+                        wid = row.get("window_id")
+                        if wid not in window_groups:
+                            window_groups[wid] = []
+                        window_groups[wid].append(row)
+            if len(window_groups) < min_windows:
+                return 1.0
+
+            window_items = []
+            for wid, rows in window_groups.items():
+                ts = max(float(r["timestamp"]) for r in rows)
+                window_items.append((ts, rows))
+            window_items.sort(key=lambda x: x[0], reverse=True)
+            window_items = window_items[:rolling_window]
+
+            model_sq_err, market_sq_err = [], []
+            for _, rows in window_items:
+                best = min(rows, key=lambda r: abs(float(r["tau_sec"]) - 150.0))
+                y = int(best["realized_up"])
+                model_sq_err.append((float(best["p_model"]) - y) ** 2)
+                try:
+                    market_sq_err.append((float(best["p_market"]) - y) ** 2)
+                except (ValueError, KeyError, TypeError):
+                    pass
+
+            if not model_sq_err or not market_sq_err:
+                return 1.0
+            model_brier = sum(model_sq_err) / len(model_sq_err)
+            market_brier = sum(market_sq_err) / len(market_sq_err)
+            weight = 0.5 + (market_brier - model_brier) * k   # market worse than model -> weight toward 1
+            return max(0.0, min(1.0, weight))
+        except Exception as e:
+            logger.warning(f"Calibrator: error computing confidence weight: {e}")
+            return 1.0

@@ -1,38 +1,14 @@
 [
   {
-    "window_id": 5962924,
-    "slug": "btc-updown-5m-1788877200",
-    "strike_k": 78305.18,
-    "settlement_price": 78341.14266666667,
-    "binance_estimate": 1,
-    "snapshot_price": 78339.535,
-    "twap_30": 78344.46066666667,
-    "twap_60": 78341.14266666667,
-    "queued_at": 1788877552.1339085,
-    "last_checked": 1788878239.3610592
-  },
-  {
-    "window_id": 5962925,
-    "slug": "btc-updown-5m-1788877500",
-    "strike_k": 78335.33,
-    "settlement_price": 78330.47949999999,
+    "window_id": 5963730,
+    "slug": "btc-updown-5m-1789119000",
+    "strike_k": 77150.005,
+    "settlement_price": 77104.2125,
     "binance_estimate": 0,
-    "snapshot_price": 78310.245,
-    "twap_30": 78324.24399999999,
-    "twap_60": 78330.47949999999,
-    "queued_at": 1788877844.9190845,
-    "last_checked": 1788878239.3610592
-  },
-  {
-    "window_id": 5962926,
-    "slug": "btc-updown-5m-1788877800",
-    "strike_k": 78337.46,
-    "settlement_price": 78366.48741666667,
-    "binance_estimate": 1,
-    "snapshot_price": 78340.095,
-    "twap_30": 78345.41366666667,
-    "twap_60": 78366.48741666667,
-    "queued_at": 1788878157.8935456,
-    "last_checked": 1788878239.3610592
+    "snapshot_price": 77093.315,
+    "twap_30": 77100.18500000001,
+    "twap_60": 77104.2125,
+    "queued_at": 1789119301.3032625,
+    "last_checked": 0.0
   }
 ]
