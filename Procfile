@@ -1,2 +1,1 @@
-worker: python run.py
-web: python dashboard.py
+web: python railway_entrypoint.py
