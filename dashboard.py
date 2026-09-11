@@ -33,15 +33,21 @@ def tail_read_csv_rows(filepath, tail_bytes):
         header_line = f.readline().decode("utf-8", errors="replace").strip()
         header_len = f.tell()
         size = os.fstat(f.fileno()).st_size
-        if size - header_len <= tail_bytes:
+        read_from_header = size - header_len <= tail_bytes
+        if read_from_header:
             f.seek(header_len)
         else:
             f.seek(size - tail_bytes)
         data = f.read()
     text = data.decode("utf-8", errors="replace")
     lines = text.split("\n")
-    if len(lines) > 1:
-        lines = lines[1:]  # drop a possibly-truncated leading partial line
+    if not read_from_header and len(lines) > 1:
+        # Only a genuine partial-tail read can start mid-line -- drop that
+        # leading fragment. When we seeked exactly to header_len (the whole
+        # remaining file fit in tail_bytes), line 0 is already a complete
+        # row and must be kept, or the oldest row in any small/fresh log
+        # file is silently lost on every read.
+        lines = lines[1:]
     reader = csv.DictReader([header_line] + [l for l in lines if l.strip()])
     return list(reader)
 
@@ -405,11 +411,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def serve_api_calibration_raw(self, query):
         """
-        Dump one row per distinct settled window (closest sample to tau_sec==150,
-        same dedupe rule as serve_api_calibration) including the newer shadow
+        Dump one row per distinct settled window, including the newer shadow
         research columns (spot_lead_lag, twap_dev, book_depth_skew) when present.
         Read-only, no secrets involved -- exists so real quant analysis on the
         actual historical data can be done outside this container.
+
+        Two different ticks are sampled per window, because the two families of
+        columns are only meaningful at different points in the window's life:
+          - "best" = the tick closest to tau_sec==150 (mid-window), same dedupe
+            rule as serve_api_calibration -- used for moneyness/vol/ofi/cbi/z/
+            p_model/p_market, so these stay comparable with the existing
+            Brier-score endpoint.
+          - "settle" = the tick closest to tau_sec==0 (last tick before
+            resolution) -- used for spot_lead_lag/twap_dev/book_depth_skew.
+            twap_dev in particular is computed in bot.py as
+            (spot_price - known_avg_price) / spot_price, and known_avg_price is
+            only populated once the trailing-TWAP settlement tracking kicks in
+            near expiry; every tick before that carries twap_dev's 0.0 default.
+            Sampling those columns at tau_sec==150 (mid-window) would read back
+            0.0 for essentially every window regardless of any real TWAP
+            mispricing, silently making Hypothesis 2 (TWAP-averaging bias)
+            untestable from this endpoint's output.
         """
         asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
         if asset not in ASSET_SUFFIX:
@@ -425,10 +447,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             wid = r.get("window_id")
             window_groups.setdefault(wid, []).append(r)
 
+        def _shadow_val(row, key):
+            v = row.get(key)
+            return _safe_float(v) if v not in (None, "") else None
+
         out = []
         for wid, wrows in window_groups.items():
             try:
                 best = min(wrows, key=lambda r: abs(_safe_float(r.get("tau_sec"), 999) - 150.0))
+                settle = min(wrows, key=lambda r: abs(_safe_float(r.get("tau_sec"), 999) - 0.0))
             except Exception:
                 continue
             out.append({
@@ -444,9 +471,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "p_model_shadow": _safe_float(best.get("p_model_shadow")) if best.get("p_model_shadow") not in (None, "") else None,
                 "p_market": _safe_float(best.get("p_market")),
                 "realized_up": best.get("realized_up") if best.get("realized_up") in ("0", "1") else None,
-                "spot_lead_lag": _safe_float(best.get("spot_lead_lag")) if best.get("spot_lead_lag") not in (None, "") else None,
-                "twap_dev": _safe_float(best.get("twap_dev")) if best.get("twap_dev") not in (None, "") else None,
-                "book_depth_skew": _safe_float(best.get("book_depth_skew")) if best.get("book_depth_skew") not in (None, "") else None,
+                "settle_tau_sec": _safe_float(settle.get("tau_sec")),
+                "spot_lead_lag": _shadow_val(settle, "spot_lead_lag"),
+                "twap_dev": _shadow_val(settle, "twap_dev"),
+                "book_depth_skew": _shadow_val(settle, "book_depth_skew"),
+                "spot_lead_lag_mid": _shadow_val(best, "spot_lead_lag"),
+                "book_depth_skew_mid": _shadow_val(best, "book_depth_skew"),
             })
         out.sort(key=lambda r: r["timestamp"])
 
