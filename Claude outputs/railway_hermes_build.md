@@ -58,6 +58,10 @@ def serve_healthz(self):
 
 **Still a real decision for you, not a build task:** paid always-on tier (~$5-10/mo) — a `worker` process on Railway's free tier still sleeps on inactivity the same as `web` does.
 
+**Python version pin.** Your local venv is running Python 3.14.2 (`venv/pyvenv.cfg`). Add a `.python-version` file (repo root) containing `3.14` so Nixpacks builds against the same version rather than whatever it defaults to — confirm Railway's Nixpacks provider actually supports 3.14 before deploying, since it's recent enough that I can't verify that from here without it going stale by the time you read this.
+
+**Important, easy to miss: the calibration history won't carry over on first deploy.** `.gitignore` correctly excludes all of `data/*.csv`, `*.json`, `*.jsonl` — that's right for keeping secrets/state out of git, but it also means a fresh Railway deploy starts with a genuinely empty `data/` volume. Concretely: the calibrator's Platt curve (currently fitted on 290+ real windows for BTC) resets to zero and sits back in "not enough data" mode until 30+ windows re-accumulate, and — more importantly — `get_confidence_weight()` resets to full trust (1.0) with no track record behind it, meaning BTC's current `LOW_CONFIDENCE_PAUSED` state (the thing correctly protecting it right now) disappears on day one of a cold Railway deploy. If you want Railway to start "warm" rather than relearn from scratch, the current `data/calibration_log*.csv` (and ideally the risk_state files) need to be manually copied onto the Railway volume after the first deploy, before the bot's first tick. Worth deciding on purpose, not discovering by accident.
+
 ---
 
 ## Hermes — concrete runbook (paste into Hermes once it's running; not a code change to the bot)
@@ -72,5 +76,8 @@ Hermes takes natural-language scheduling rather than a config file, so this is w
 2. Daily at a fixed time: "Read the last 20 rows with `status=EXECUTED` in each asset's `trade_events*.csv`. Report win rate and mean entry price per asset. Flag BTC specifically if any executed trade's entry price falls outside [0.333, 0.50] — that would mean the payout filter isn't holding."
 3. Daily: "Check whether ETH has executed any trade in the last 24 hours (`trade_events_eth.csv`, `status=EXECUTED`). If yes, this is the first ETH trade in a while — flag it explicitly, since ETH has been confidence-paused most days."
 4. Weekly: "Using `calibration_log*.csv`, dedupe to one row per `window_id` at `tau_sec` nearest 150, and report Brier score of `p_model` vs `realized_up` per asset, trailing 7 days only. Note the trend versus the prior week."
+5. **Highest priority, check every 15 minutes, not lumped with the daily ones:** "Check whether `data/risk_state_drawdown.json` exists. If it now exists and `circuit_breaker_triggered` is `true`, this is the permanent portfolio-wide drawdown breaker — alert immediately, marked urgent, distinct from the daily per-asset breakers. This one doesn't reset at UTC rollover and means all trading is halted until someone manually clears it."
+6. Every 4 hours: "Check the funnel counts in the latest `[ROLLUP ...]` log lines (or recompute from `trade_events*.csv`) for a spike in `BLOCKED_PHANTOM` relative to its recent baseline rate. A sustained spike (not the usual background rate already established) could mean a real connectivity problem rather than the known thin-liquidity pattern — worth a second look, not an automatic assumption it's business as usual."
+7. Daily: "If SOL's `circuit_breaker_triggered` flips from `true` back to `false` (i.e. it re-armed at UTC day rollover), note it as informational — not urgent, just confirms the day reset correctly."
 
 None of this runs anywhere yet — it's the exact text to hand Hermes once you stand it up, so that step takes minutes instead of another design pass.

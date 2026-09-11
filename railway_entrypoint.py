@@ -14,6 +14,7 @@ from loguru import logger
 import dashboard
 from src.bot import Polymarket5mBot
 from src import notifier
+from src import chat_bot
 from config import config
 
 if __name__ == "__main__":
@@ -31,6 +32,12 @@ if __name__ == "__main__":
     # has something to hit immediately, without needing a second service.
     dash_thread = threading.Thread(target=dashboard.run, daemon=True)
     dash_thread.start()
+
+    # Telegram chat interface (status queries + pause/resume) runs in its own
+    # daemon thread, calling the dashboard's own HTTP API on localhost -- see
+    # src/chat_bot.py. A no-op if TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are unset.
+    chat_thread = threading.Thread(target=chat_bot.run, daemon=True)
+    chat_thread.start()
 
     bot = Polymarket5mBot()
     try:
