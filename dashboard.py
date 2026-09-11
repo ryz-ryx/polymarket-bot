@@ -162,6 +162,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.serve_api_control_get()
             elif path == "/api/logs":
                 self.serve_api_logs(parse_qs(parsed.query))
+            elif path == "/api/calibration_raw":
+                self.serve_api_calibration_raw(parse_qs(parsed.query))
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -399,6 +401,61 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "market_brier": round(market_brier, 4) if market_brier is not None else None,
             "model_better_than_market": (model_brier < market_brier) if (model_brier is not None and market_brier is not None) else None,
             "window_fully_covered": covered,
+        })
+
+    def serve_api_calibration_raw(self, query):
+        """
+        Dump one row per distinct settled window (closest sample to tau_sec==150,
+        same dedupe rule as serve_api_calibration) including the newer shadow
+        research columns (spot_lead_lag, twap_dev, book_depth_skew) when present.
+        Read-only, no secrets involved -- exists so real quant analysis on the
+        actual historical data can be done outside this container.
+        """
+        asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
+        if asset not in ASSET_SUFFIX:
+            self._send_json({"error": f"unknown asset '{asset}', expected BTC/ETH/SOL"}, status=400)
+            return
+        days = _safe_float(query.get("days", ["30"])[0], 30.0)
+        fp = os.path.join(BASE_DIR, "data", f"calibration_log{ASSET_SUFFIX[asset]}.csv")
+
+        rows, covered = read_rows_covering_window(fp, days * 86400, max_bytes_cap=64_000_000)
+
+        window_groups = {}
+        for r in rows:
+            wid = r.get("window_id")
+            window_groups.setdefault(wid, []).append(r)
+
+        out = []
+        for wid, wrows in window_groups.items():
+            try:
+                best = min(wrows, key=lambda r: abs(_safe_float(r.get("tau_sec"), 999) - 150.0))
+            except Exception:
+                continue
+            out.append({
+                "window_id": wid,
+                "timestamp": _safe_float(best.get("timestamp")),
+                "tau_sec": _safe_float(best.get("tau_sec")),
+                "moneyness": _safe_float(best.get("moneyness")),
+                "vol_annualized": _safe_float(best.get("vol_annualized")),
+                "ofi": _safe_float(best.get("ofi")),
+                "cbi": _safe_float(best.get("cbi")),
+                "z": _safe_float(best.get("z")),
+                "p_model": _safe_float(best.get("p_model")),
+                "p_model_shadow": _safe_float(best.get("p_model_shadow")) if best.get("p_model_shadow") not in (None, "") else None,
+                "p_market": _safe_float(best.get("p_market")),
+                "realized_up": best.get("realized_up") if best.get("realized_up") in ("0", "1") else None,
+                "spot_lead_lag": _safe_float(best.get("spot_lead_lag")) if best.get("spot_lead_lag") not in (None, "") else None,
+                "twap_dev": _safe_float(best.get("twap_dev")) if best.get("twap_dev") not in (None, "") else None,
+                "book_depth_skew": _safe_float(best.get("book_depth_skew")) if best.get("book_depth_skew") not in (None, "") else None,
+            })
+        out.sort(key=lambda r: r["timestamp"])
+
+        self._send_json({
+            "asset": asset,
+            "days": days,
+            "window_fully_covered": covered,
+            "count": len(out),
+            "windows": out,
         })
 
     def serve_api_control_get(self):
