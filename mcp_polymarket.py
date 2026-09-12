@@ -139,11 +139,22 @@ def main() -> None:
 
     log.info("polymarket MCP server starting — tools: %s", [t["name"] for t in _tools()])
 
+    # Cloud deploys (Railway) run this over streamable-HTTP so a remote Hermes
+    # instance can reach it via `url:` in mcp_servers config -- no local file/venv
+    # needed, since every tool here is already just an HTTP proxy to the dashboard
+    # API. Local desktop Hermes keeps using stdio (`command:` in config.yaml)
+    # unchanged. Railway sets PORT automatically; MCP_TRANSPORT=http forces HTTP
+    # mode even without PORT (e.g. local testing).
+    port_env = os.environ.get("PORT")
+    use_http = bool(port_env) or os.environ.get("MCP_TRANSPORT", "").lower() == "http"
+
     async def _run() -> None:
-        try:
+        if use_http:
+            port = int(port_env or "8000")
+            log.info("Running as streamable-HTTP MCP server on 0.0.0.0:%d/mcp", port)
+            await server.run_streamable_http_async(host="0.0.0.0", port=port, stateless_http=True)
+        else:
             await server.run_stdio_async()
-        finally:
-            pass
 
     asyncio.run(_run())
 
