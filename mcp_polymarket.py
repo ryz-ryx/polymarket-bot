@@ -75,6 +75,10 @@ def _tools() -> list[dict[str, Any]]:
         {"name": "polymarket_control", "description": "Pause or resume the bot (requires CONTROL_SECRET). Prefer polymarket_pause / polymarket_start for clearer intent.", "inputSchema": {"type": "object", "properties": {"paused": {"type": "boolean", "description": "True to pause, False to resume"}, "updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}, "required": ["paused"]}},
         {"name": "polymarket_pause", "description": "Pause the bot (stops opening new trades; requires CONTROL_SECRET).", "inputSchema": {"type": "object", "properties": {"updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}}},
         {"name": "polymarket_start", "description": "Resume/start the bot after a pause (requires CONTROL_SECRET).", "inputSchema": {"type": "object", "properties": {"updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}}},
+        {"name": "polymarket_version", "description": "Get the git commit/branch/deployment currently running in production, so you can confirm whether a given fix has actually deployed.", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "polymarket_risk_config", "description": "Get the bot's current risk settings (max position size, max daily loss, Kelly fraction, drawdown limits, paper vs live trading).", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "polymarket_reset_daily_breaker", "description": "Clear a tripped daily-loss circuit breaker (requires CONTROL_SECRET). Only clears the breaker flag, never the underlying daily PnL -- if the day's loss is still past the configured floor, it re-trips on the very next trade check, so this can never mask a genuinely bad day. Use only when asked to un-stick a breaker the user believes tripped in error.", "inputSchema": {"type": "object", "properties": {"updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}}},
+        {"name": "polymarket_usage", "description": "List every available command/tool this server exposes, with a one-line description of each. Use this for 'what can you do' / 'usage' / 'help' requests.", "inputSchema": {"type": "object", "properties": {}}},
     ]
 
 
@@ -135,6 +139,16 @@ def _call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         if not CONTROL_SECRET:
             return {"error": "CONTROL_SECRET not configured"}
         return _post("/api/control", {"paused": False, "updated_by": args.get("updated_by", "hermes")}, hdrs={"X-Control-Secret": CONTROL_SECRET})
+    if name == "polymarket_version":
+        return _get("/api/version")
+    if name == "polymarket_risk_config":
+        return _get("/api/risk_config")
+    if name == "polymarket_reset_daily_breaker":
+        if not CONTROL_SECRET:
+            return {"error": "CONTROL_SECRET not configured"}
+        return _post("/api/reset_daily_breaker", {"updated_by": args.get("updated_by", "hermes")}, hdrs={"X-Control-Secret": CONTROL_SECRET})
+    if name == "polymarket_usage":
+        return {"commands": [{"name": t["name"], "description": t["description"]} for t in _tools()]}
     return {"error": f"Unknown tool: {name}"}
 
 
@@ -199,6 +213,26 @@ def main() -> None:
     def polymarket_start(updated_by: str = "hermes") -> dict[str, Any]:
         """Resume/start the bot after a pause."""
         return _call_tool("polymarket_start", {"updated_by": updated_by})
+
+    @server.tool()
+    def polymarket_version() -> dict[str, Any]:
+        """Get the git commit/branch/deployment currently running in production."""
+        return _call_tool("polymarket_version", {})
+
+    @server.tool()
+    def polymarket_risk_config() -> dict[str, Any]:
+        """Get the bot's current risk settings (position size, daily loss limit, Kelly fraction, etc)."""
+        return _call_tool("polymarket_risk_config", {})
+
+    @server.tool()
+    def polymarket_reset_daily_breaker(updated_by: str = "hermes") -> dict[str, Any]:
+        """Clear a tripped daily-loss circuit breaker. Only lifts the flag; re-trips immediately if the underlying loss is still past the floor."""
+        return _call_tool("polymarket_reset_daily_breaker", {"updated_by": updated_by})
+
+    @server.tool()
+    def polymarket_usage() -> dict[str, Any]:
+        """List every available command this server exposes, with a description of each."""
+        return _call_tool("polymarket_usage", {})
 
     log.info("polymarket MCP server starting — tools: %s", [t["name"] for t in _tools()])
 

@@ -12,6 +12,7 @@ from urllib.parse import urlparse, parse_qs
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import config
 from src.control_state import read_control_state, write_control_state
+from src.breaker_reset import request_reset
 
 ASSET_SUFFIX = {"BTC": ""}
 
@@ -208,6 +209,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.serve_api_logs(parse_qs(parsed.query))
             elif path == "/api/calibration_raw":
                 self.serve_api_calibration_raw(parse_qs(parsed.query))
+            elif path == "/api/version":
+                self.serve_api_version()
+            elif path == "/api/risk_config":
+                self.serve_api_risk_config()
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -220,6 +225,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             if parsed.path == "/api/control":
                 self.serve_api_control_post()
+            elif parsed.path == "/api/reset_daily_breaker":
+                self.serve_api_reset_daily_breaker()
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -557,6 +564,50 @@ class DashboardHandler(BaseHTTPRequestHandler):
         updated_by = str(body.get("updated_by", "unknown"))[:100]
         state = write_control_state(bool(body["paused"]), updated_by=updated_by)
         self._send_json({"ok": True, **state})
+
+    def serve_api_reset_daily_breaker(self):
+        if not config.control_secret:
+            self._send_json({"error": "CONTROL_SECRET is not set on the server -- POST /api/reset_daily_breaker is disabled (fail closed)."}, status=503)
+            return
+        supplied = self.headers.get("X-Control-Secret", "")
+        if not hmac.compare_digest(supplied, config.control_secret):
+            self._send_json({"error": "invalid or missing X-Control-Secret header"}, status=401)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            body = json.loads(raw or b"{}")
+        except Exception:
+            self._send_json({"error": "invalid JSON body"}, status=400)
+            return
+        updated_by = str(body.get("updated_by", "unknown"))[:100]
+        # Only clears circuit_breaker_triggered, never daily_pnl -- if the
+        # underlying loss is still past max_daily_loss_usd, RiskManager
+        # re-trips it on the very next can_trade() check.
+        req = request_reset(updated_by=updated_by)
+        self._send_json({"ok": True, **req, "note": "Breaker flag cleared. If daily PnL is still past the loss floor, it will re-trip on the next trade check."})
+
+    def serve_api_version(self):
+        self._send_json({
+            "git_commit": os.environ.get("RAILWAY_GIT_COMMIT_SHA", "unknown")[:12],
+            "git_branch": os.environ.get("RAILWAY_GIT_BRANCH", "unknown"),
+            "deployment_id": os.environ.get("RAILWAY_DEPLOYMENT_ID", "unknown"),
+            "environment": os.environ.get("RAILWAY_ENVIRONMENT_NAME", "local"),
+        })
+
+    def serve_api_risk_config(self):
+        self._send_json({
+            "paper_trading": config.paper_trading,
+            "target_asset": config.target_asset,
+            "starting_balance_usd": config.starting_balance_usd,
+            "max_position_usd": config.max_position_usd,
+            "max_daily_loss_usd": config.max_daily_loss_usd,
+            "max_portfolio_daily_loss_usd": config.max_portfolio_daily_loss_usd,
+            "max_portfolio_drawdown_pct": config.max_portfolio_drawdown_pct,
+            "kelly_fraction": config.kelly_fraction,
+            "slippage_tolerance": config.slippage_tolerance,
+            "note": "Strategy entry thresholds (min_edge, min_abs_z, entry price band) are set in src/bot.py's AssetTradingEngine, not here.",
+        })
 
     def serve_api_logs(self, query):
         lines_wanted = min(max(int(_safe_float(query.get("lines", ["200"])[0], 200)), 1), 2000)

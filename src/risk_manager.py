@@ -3,6 +3,7 @@ import json
 import datetime
 from typing import Optional
 from loguru import logger
+from src.breaker_reset import read_reset_request
 
 class RiskManager:
     """
@@ -26,6 +27,7 @@ class RiskManager:
         self.circuit_breaker_triggered = False
         self.current_day = datetime.datetime.now(datetime.timezone.utc).date()
         self.open_positions: dict[str, dict] = {}
+        self._last_breaker_reset_ack = 0.0
 
         if self.state_file:
             self._load_state()
@@ -82,8 +84,23 @@ class RiskManager:
             self.circuit_breaker_triggered = False
             self._save_state()
 
+    def _check_breaker_reset_request(self):
+        if not self.circuit_breaker_triggered:
+            return
+        req = read_reset_request()
+        if req.get("requested_at", 0.0) > self._last_breaker_reset_ack:
+            self._last_breaker_reset_ack = req["requested_at"]
+            self.circuit_breaker_triggered = False
+            self._save_state()
+            logger.warning(
+                f"RiskManager: Daily circuit breaker manually cleared by request from "
+                f"{req.get('updated_by')!r}. Daily PnL still ${self.daily_pnl:+.2f} -- "
+                f"will re-trip immediately on the next check if still past the loss floor."
+            )
+
     def can_trade(self) -> bool:
         self._check_day_rollover()
+        self._check_breaker_reset_request()
         if self.circuit_breaker_triggered:
             return False
         if self.daily_pnl <= -self.max_daily_loss_usd:
