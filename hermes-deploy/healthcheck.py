@@ -55,9 +55,18 @@ def check_telegram() -> tuple[bool, str]:
 def check_discord() -> tuple[bool, str]:
     if not DISCORD_BOT_TOKEN:
         return True, "DISCORD_BOT_TOKEN not set -- skipping (platform likely disabled)"
+    # Discord's API documentation requires a descriptive User-Agent on all
+    # requests; omitting one (urllib's default is a bare "Python-urllib/x.y")
+    # gets 403'd by Discord's edge as bot-protection, unrelated to whether
+    # the token itself is valid -- confirmed live: this returned HTTP 403
+    # here while Discord was simultaneously and verifiably connected and
+    # processing real sessions.
     req = urllib.request.Request(
         "https://discord.com/api/v10/users/@me",
-        headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"},
+        headers={
+            "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+            "User-Agent": "HermesHealthcheck (https://github.com/ryz-ryx/polymarket-bot, 1.0)",
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
