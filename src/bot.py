@@ -14,6 +14,7 @@ from src.risk_manager import RiskManager
 from src.executor import OrderExecutor
 from src.calibrator import EmpiricalCalibrator
 from src.event_logger import TradeEventLogger, EVENT_LOG
+from src.arbitrage_scanner import ArbitrageScanner
 from src.deribit_feed import DeribitFeed
 from src.book_ws import PolymarketBookWS
 from src.strategies.claud_quant import ClaudQuantBinaryOptionStrategy, estimate_taker_fee_fraction
@@ -56,6 +57,7 @@ class AssetTradingEngine:
         self.deribit_feed = DeribitFeed(currency=self.asset)
 
         self.calibrator = EmpiricalCalibrator(log_path="data/calibration_log.csv", observations_path="data/pending_window_observations.json")
+        self.arbitrage_scanner = ArbitrageScanner(log_path="data/arbitrage_scan.csv")
 
         self.event_log_path = "data/trade_events.csv"
         self.event_logger = TradeEventLogger(log_path=self.event_log_path)
@@ -559,6 +561,14 @@ class AssetTradingEngine:
         await self.market_feed.find_active_5min_market()
         live_quotes = await self.market_feed.get_live_market_prices()
 
+        # Shadow-only: does YES+NO < $1.00 ever actually occur on this market? Detection
+        # only, no execution -- answers the empirical question before any capital is risked.
+        self.arbitrage_scanner.check(
+            window_id=self.current_window_id,
+            yes_ask=live_quotes.get("yes_ask"),
+            no_ask=live_quotes.get("no_ask"),
+        )
+
         # Pillar A: Contract Book Imbalance (CBI) from Polymarket's resting YES depth ladder
         yes_bid_depth = sum(float(l["size"]) for l in live_quotes.get("yes_bids", []) if isinstance(l, dict) and "size" in l)
         yes_ask_depth = sum(float(l["size"]) for l in live_quotes.get("yes_asks", []) if isinstance(l, dict) and "size" in l)
@@ -566,6 +576,7 @@ class AssetTradingEngine:
         cbi = (yes_bid_depth - yes_ask_depth) / total_depth if total_depth > 0 else 0.0
 
         norm_momentum = max(min(momentum / 50.0, 1.0), -1.0)
+        regime_factor = self.spot_feed.get_regime_factor()
         raw_p_model, z = self.strategy.calculate_fair_probability(
             S_t=pricing_spot,
             K=self.strike_price,
@@ -575,7 +586,8 @@ class AssetTradingEngine:
             momentum_normalized=norm_momentum,
             cbi_normalized=cbi,
             known_avg_price=known_avg_price,
-            twap_window_sec=TWAP_SETTLEMENT_WINDOW_SEC
+            twap_window_sec=TWAP_SETTLEMENT_WINDOW_SEC,
+            regime_factor=regime_factor
         )
 
         # Proposal 1: shadow/counterfactual logging. Recompute fair probability using
@@ -645,6 +657,7 @@ class AssetTradingEngine:
             "no_bid": live_quotes["no_bid"],
             "known_avg_price": known_avg_price,
             "twap_window_sec": TWAP_SETTLEMENT_WINDOW_SEC,
+            "regime_factor": regime_factor,
         }
 
         confidence_weight = self.calibrator.get_confidence_weight()
@@ -835,7 +848,8 @@ class AssetTradingEngine:
                     size = self.risk_manager.calculate_position_size(
                         win_probability=signal["estimated_prob"],
                         odds=odds,
-                        bankroll=bankroll
+                        bankroll=bankroll,
+                        confidence_weight=confidence_weight
                     )
 
                     if size > 0:

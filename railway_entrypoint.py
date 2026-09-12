@@ -15,6 +15,7 @@ import dashboard
 from src.bot import Polymarket5mBot
 from src import notifier
 from src import chat_bot
+from src.reset_state import reset_all_state_if_requested
 from config import config
 
 if __name__ == "__main__":
@@ -27,6 +28,8 @@ if __name__ == "__main__":
     logger.remove()
     logger.add(sys.stdout, format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{message}</cyan>", level="INFO")
     logger.add("logs/bot_{time:YYYY-MM-DD}.log", rotation="00:00", retention="14 days", level="DEBUG", encoding="utf-8")
+
+    reset_all_state_if_requested()
 
     # Dashboard + /healthz run in a daemon thread so Railway's healthcheck
     # has something to hit immediately, without needing a second service.

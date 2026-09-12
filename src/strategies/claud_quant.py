@@ -57,6 +57,26 @@ class ClaudQuantBinaryOptionStrategy(BaseStrategy):
         max_entry_price: Optional[float] = None
     ):
         super().__init__(name="ClaudQuantBinaryOption")
+
+        # Guardrail, not a hard stop: research on binary prediction markets is unambiguous
+        # that breakeven win rate equals entry price, so a $0.85 entry needs 85% accuracy
+        # just to survive, with one loss wiping out ~5.7 wins at that price. Widening the
+        # entry-price band or dropping min_edge to chase more trade volume recreates exactly
+        # that trap. This just makes it loud if it ever happens (by hand-edit or future
+        # refactor) instead of silently drifting into worse risk/reward.
+        if max_entry_price is not None and max_entry_price > 0.55:
+            logger.warning(
+                f"ClaudQuantBinaryOptionStrategy: max_entry_price={max_entry_price} exceeds the "
+                f"0.55 research-backed safety band -- breakeven win rate rises with entry price; "
+                f"this increases risk of the 'need 85%+ accuracy to survive' trap."
+            )
+        if min_edge < 0.02:
+            logger.warning(
+                f"ClaudQuantBinaryOptionStrategy: min_edge={min_edge} is below the 0.02 floor -- "
+                f"after fees and slippage this may not leave a real edge once live execution "
+                f"degrades ~10-15% versus backtest."
+            )
+
         self.min_edge = min_edge
         self.slippage_buffer = slippage_buffer
         self.ofi_drift_weight = ofi_drift_weight
@@ -79,7 +99,8 @@ class ClaudQuantBinaryOptionStrategy(BaseStrategy):
         momentum_normalized: float = 0.0,
         cbi_normalized: float = 0.0,
         known_avg_price: Optional[float] = None,
-        twap_window_sec: float = 60.0
+        twap_window_sec: float = 60.0,
+        regime_factor: float = 1.0
     ) -> tuple[float, float]:
         if tau_seconds <= 0.5:
             p_up = 1.0 if S_t >= K else 0.0
@@ -106,10 +127,13 @@ class ClaudQuantBinaryOptionStrategy(BaseStrategy):
         log_moneyness = math.log(max(effective_S, 1e-6) / max(K, 1e-6))
         z_base = (log_moneyness - 0.5 * sigma_sq * tau) / vol_time_term
 
-        # Micro-drift from Aggressor Flow, short-term momentum, and Polymarket Contract Book Imbalance (CBI)
+        # Micro-drift from Aggressor Flow, short-term momentum, and Polymarket Contract Book Imbalance (CBI).
+        # Momentum's weight is scaled by regime_factor (variance-ratio regime detector, see
+        # SpotFeed.get_regime_factor): >1 in trending regimes where momentum is informative,
+        # <1 in mean-reverting chop where a recent move is more likely to snap back.
         drift_adj = (
             (self.ofi_drift_weight * ofi_normalized) +
-            (self.momentum_drift_weight * momentum_normalized) +
+            (self.momentum_drift_weight * regime_factor * momentum_normalized) +
             (self.cbi_drift_weight * cbi_normalized)
         )
         z = z_base + drift_adj
@@ -137,6 +161,7 @@ class ClaudQuantBinaryOptionStrategy(BaseStrategy):
         ofi = market_info.get("ofi_normalized", 0.0)
         known_avg_price = market_info.get("known_avg_price")
         twap_window_sec = market_info.get("twap_window_sec", 60.0)
+        regime_factor = market_info.get("regime_factor", 1.0)
 
         # Extract Contract Book Imbalance (CBI) from Polymarket depth ladder
         cbi = float(order_book.get("cbi", 0.0))
@@ -153,7 +178,8 @@ class ClaudQuantBinaryOptionStrategy(BaseStrategy):
             momentum_normalized=norm_momentum,
             cbi_normalized=cbi,
             known_avg_price=known_avg_price,
-            twap_window_sec=twap_window_sec
+            twap_window_sec=twap_window_sec,
+            regime_factor=regime_factor
         )
 
         # Skip near-50/50 noise chop

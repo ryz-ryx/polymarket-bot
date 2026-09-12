@@ -100,6 +100,44 @@ def read_jsonl_fills(asset_suffix=""):
             pass
     return entries
 
+def get_calibration_maturity(fp, platt_threshold=30, isotonic_threshold=300):
+    """
+    All-time (not lookback-windowed) count of distinct settled windows, so growth-stage
+    decisions can be judged against real progress toward the calibrator's trust
+    thresholds instead of guesswork. Below platt_threshold, EmpiricalCalibrator.calibrate()
+    is a no-op (raw model probabilities pass through unshrunk) -- results before that
+    point shouldn't be used to judge the strategy.
+    """
+    distinct_windows = 0
+    if os.path.exists(fp):
+        try:
+            window_ids = set()
+            with open(fp, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get("realized_up") in ("0", "1"):
+                        window_ids.add(row.get("window_id"))
+            distinct_windows = len(window_ids)
+        except Exception:
+            pass
+
+    if distinct_windows < platt_threshold:
+        stage = "uncalibrated"
+    elif distinct_windows < isotonic_threshold:
+        stage = "platt"
+    else:
+        stage = "isotonic"
+
+    return {
+        "distinct_settled_windows": distinct_windows,
+        "stage": stage,
+        "windows_until_platt_ready": max(0, platt_threshold - distinct_windows),
+        "windows_until_isotonic_ready": max(0, isotonic_threshold - distinct_windows),
+        "platt_progress_pct": round(min(100.0, 100.0 * distinct_windows / platt_threshold), 1),
+        "isotonic_progress_pct": round(min(100.0, 100.0 * distinct_windows / isotonic_threshold), 1),
+    }
+
+
 def get_asset_confidence_weight(asset_suffix="", min_windows=30, rolling_window=100, k=8.0):
     log_path = os.path.join(BASE_DIR, "data", f"calibration_log{asset_suffix}.csv")
     if not os.path.exists(log_path):
@@ -407,6 +445,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "market_brier": round(market_brier, 4) if market_brier is not None else None,
             "model_better_than_market": (model_brier < market_brier) if (model_brier is not None and market_brier is not None) else None,
             "window_fully_covered": covered,
+            "maturity": get_calibration_maturity(fp),
         })
 
     def serve_api_calibration_raw(self, query):

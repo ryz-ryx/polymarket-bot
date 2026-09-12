@@ -158,6 +158,50 @@ class SpotFeed:
                 return current_price - p
         return current_price - self.second_buckets[0][1]
 
+    def get_regime_factor(self, lookback_seconds: float = 60.0, min_factor: float = 0.4, max_factor: float = 1.6) -> float:
+        """
+        Variance-ratio regime detector: distinguishes trending markets (where recent
+        momentum is informative) from mean-reverting chop (where momentum is noise or
+        even contrarian). Uses the classic Lo-MacKinlay variance ratio at lag 2:
+            VR(2) = Var(2-period log returns) / (2 * Var(1-period log returns))
+        VR > 1 implies positive serial correlation (trending) -> momentum signal should
+        be trusted more. VR < 1 implies negative serial correlation (mean-reverting) ->
+        momentum should be dampened, since a recent move is more likely to snap back.
+        Returns 1.0 (neutral, no adjustment) when there isn't enough tick history yet.
+        """
+        now_sec = self.second_buckets[-1][0] if self.second_buckets else None
+        if now_sec is None:
+            return 1.0
+        window = [p for sec, p in self.second_buckets if sec > now_sec - lookback_seconds]
+        if len(window) < 12:
+            return 1.0
+
+        one_step_returns = []
+        for i in range(1, len(window)):
+            if window[i - 1] > 0:
+                one_step_returns.append(math.log(window[i] / window[i - 1]))
+        if len(one_step_returns) < 10:
+            return 1.0
+
+        two_step_returns = []
+        for i in range(2, len(window)):
+            if window[i - 2] > 0:
+                two_step_returns.append(math.log(window[i] / window[i - 2]))
+        if len(two_step_returns) < 5:
+            return 1.0
+
+        def _variance(xs):
+            m = sum(xs) / len(xs)
+            return sum((x - m) ** 2 for x in xs) / max(len(xs) - 1, 1)
+
+        var_1 = _variance(one_step_returns)
+        var_2 = _variance(two_step_returns)
+        if var_1 <= 1e-12:
+            return 1.0
+
+        vr = var_2 / (2.0 * var_1)
+        return max(min(vr, max_factor), min_factor)
+
     def get_trailing_twap(self, seconds: float) -> Optional[float]:
         """
         Trailing time-weighted average price over the last `seconds` seconds,

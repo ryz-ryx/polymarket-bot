@@ -93,7 +93,7 @@ class RiskManager:
             return False
         return True
 
-    def calculate_position_size(self, win_probability: float, odds: float, bankroll: float) -> float:
+    def calculate_position_size(self, win_probability: float, odds: float, bankroll: float, confidence_weight: float = 1.0) -> float:
         """
         Full general Kelly criterion:
         f* = (b * p - q) / b
@@ -102,6 +102,13 @@ class RiskManager:
           p = win_probability
           q = 1 - p
         Allows cheap longshots (p < 0.50) if expected value is positive (b*p > q).
+
+        `confidence_weight` (from EmpiricalCalibrator.get_confidence_weight(), 0-1) scales
+        kelly_fraction directly. The calibrator already shrinks win_probability itself toward
+        the market price when the model hasn't proven it beats the market -- but that alone
+        leaves bet SIZE unchanged even during a cold streak. Scaling kelly_fraction too means
+        stakes shrink automatically right when the model's edge is least trustworthy, instead
+        of only the probability estimate becoming more conservative.
         """
         self._check_day_rollover()
         if not self.can_trade() or win_probability <= 0.01:
@@ -117,9 +124,13 @@ class RiskManager:
         if kelly_pct <= 0:
             return 0.0
 
-        suggested_size = bankroll * (kelly_pct * self.kelly_fraction)
+        effective_kelly_fraction = self.kelly_fraction * max(0.0, min(1.0, confidence_weight))
+        suggested_size = bankroll * (kelly_pct * effective_kelly_fraction)
         final_size = min(suggested_size, self.max_position_usd)
-        logger.info(f"Risk Check: Kelly % = {kelly_pct*100:.1f}%, Sized: ${final_size:.2f} USD")
+        logger.info(
+            f"Risk Check: Kelly % = {kelly_pct*100:.1f}%, Confidence = {confidence_weight:.2f}, "
+            f"Sized: ${final_size:.2f} USD"
+        )
         return round(final_size, 2)
 
     def record_trade_result(self, pnl: float):

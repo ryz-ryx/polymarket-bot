@@ -373,6 +373,44 @@ class EmpiricalCalibrator:
             logger.warning(f"Calibration predict failed, using raw p_model: {e}")
         return p_model
 
+    def get_maturity(self, platt_threshold: int = 30, isotonic_threshold: int = 300) -> Dict[str, Any]:
+        """
+        Reports how close the calibrator is to its trust thresholds, so growth-stage
+        decisions (position sizing, whether to trust live results yet) can be judged
+        against real progress instead of guesswork. Below platt_threshold distinct
+        settled windows, calibrate()/get_confidence_weight() are no-ops (raw model
+        probabilities pass through unshrunk) -- results before that point shouldn't
+        be used to judge the strategy.
+        """
+        distinct_windows = 0
+        if os.path.exists(self.log_path):
+            try:
+                window_ids = set()
+                with open(self.log_path, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row.get("realized_up") in ("0", "1"):
+                            window_ids.add(row.get("window_id"))
+                distinct_windows = len(window_ids)
+            except Exception as e:
+                logger.warning(f"Calibrator: error computing maturity: {e}")
+
+        if distinct_windows < platt_threshold:
+            stage = "uncalibrated"
+        elif distinct_windows < isotonic_threshold:
+            stage = "platt"
+        else:
+            stage = "isotonic"
+
+        return {
+            "distinct_settled_windows": distinct_windows,
+            "stage": stage,
+            "windows_until_platt_ready": max(0, platt_threshold - distinct_windows),
+            "windows_until_isotonic_ready": max(0, isotonic_threshold - distinct_windows),
+            "platt_progress_pct": round(min(100.0, 100.0 * distinct_windows / platt_threshold), 1),
+            "isotonic_progress_pct": round(min(100.0, 100.0 * distinct_windows / isotonic_threshold), 1),
+        }
+
     def get_confidence_weight(self, min_windows: int = 30, rolling_window: int = 100, k: float = 8.0) -> float:
         """
         Compares model Brier score vs market Brier score over the most recent
