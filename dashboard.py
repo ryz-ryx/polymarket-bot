@@ -221,7 +221,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             }
             positions_data = read_json_file(pos_file) or {
                 "positions": [],
-                "simulated_balance": 50.0
+                "simulated_balance": config.starting_balance_usd
             }
 
             conf_weight = get_asset_confidence_weight(suffix)
