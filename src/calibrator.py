@@ -1,5 +1,6 @@
 import os
 import csv
+import pickle
 import time
 from typing import Optional, List, Tuple, Dict, Any
 import numpy as np
@@ -21,7 +22,12 @@ class EmpiricalCalibrator:
        preventing 1-window degeneracies (e.g. mapping all probabilities to 1.0 or 0.0).
     4. Evaluates both classes (requires seeing at least one UP and one DOWN window) to avoid monotonic collapse.
     """
-    def __init__(self, log_path: str = LOG_FILE, observations_path: str = OBSERVATIONS_FILE):
+    def __init__(
+        self,
+        log_path: str = LOG_FILE,
+        observations_path: str = OBSERVATIONS_FILE,
+        pretrained_path: Optional[str] = None,
+    ):
         self.log_path = log_path
         self.observations_path = observations_path
         self.pending_window_observations: List[Dict[str, Any]] = []
@@ -30,6 +36,22 @@ class EmpiricalCalibrator:
         self.calibration_method: str = "none"
         self.is_fitted = False
         self._last_obs_save_time: float = 0.0
+
+        # Offline warm-start: an isotonic curve fit on ~105k backtest windows
+        # (build_pretrained_calibration.py), used ONLY until live data reaches
+        # the platt_threshold (30 windows) in fit_calibration_curve(). Once live
+        # fitting kicks in, it fully replaces this -- this just avoids trading
+        # on raw uncorrected p_model during the cold-start window, since we
+        # already know from the backtest that raw p_model is measurably
+        # miscalibrated (esp. ETH/SOL tails).
+        self.pretrained_model: Optional[IsotonicRegression] = None
+        if pretrained_path and os.path.exists(pretrained_path):
+            try:
+                with open(pretrained_path, "rb") as f:
+                    self.pretrained_model = pickle.load(f)
+                logger.info(f"Calibrator: loaded pretrained (backtest-derived) isotonic prior from {pretrained_path}")
+            except Exception as e:
+                logger.warning(f"Calibrator: failed to load pretrained prior at {pretrained_path}: {e}")
 
         # pending_window_observations used to be in-memory only, which meant every
         # in-flight window's tick history was silently discarded on restart -- the
@@ -358,8 +380,18 @@ class EmpiricalCalibrator:
             return False
 
     def calibrate(self, p_model: float) -> float:
-        """Applies empirical Platt or isotonic correction only when safely fitted on 30+ distinct windows."""
+        """
+        Applies empirical Platt or isotonic correction when safely fitted on
+        30+ distinct live windows. Below that, falls back to the pretrained
+        (backtest-derived) isotonic prior if one was loaded, rather than
+        passing raw p_model through uncorrected during cold start.
+        """
         if not self.is_fitted:
+            if self.pretrained_model is not None:
+                try:
+                    return float(self.pretrained_model.predict([p_model])[0])
+                except Exception as e:
+                    logger.warning(f"Pretrained calibration predict failed, using raw p_model: {e}")
             return p_model
         try:
             if self.calibration_method == "platt" and self.platt_model is not None:

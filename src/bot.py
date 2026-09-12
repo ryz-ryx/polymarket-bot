@@ -56,7 +56,12 @@ class AssetTradingEngine:
         self.spot_feed = SpotFeed(symbol=f"{self.asset}USDT")
         self.deribit_feed = DeribitFeed(currency=self.asset)
 
-        self.calibrator = EmpiricalCalibrator(log_path="data/calibration_log.csv", observations_path="data/pending_window_observations.json")
+        pretrained_calib_path = f"data/pretrained_calibration_{self.asset.lower()}.pkl"
+        self.calibrator = EmpiricalCalibrator(
+            log_path="data/calibration_log.csv",
+            observations_path="data/pending_window_observations.json",
+            pretrained_path=pretrained_calib_path if os.path.exists(pretrained_calib_path) else None,
+        )
         self.arbitrage_scanner = ArbitrageScanner(log_path="data/arbitrage_scan.csv")
 
         self.event_log_path = "data/trade_events.csv"
