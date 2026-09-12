@@ -1,0 +1,17 @@
+model:
+  default: openai/gpt-4o-mini
+  provider: openrouter
+group_sessions_per_user: true
+mcp_servers:
+  polymarket:
+    url: https://talented-passion-production.up.railway.app/mcp
+platforms:
+  telegram:
+    enabled: true
+    home_channel:
+      platform: telegram
+      chat_id: '8798456807'
+      name: aqzz
+      user_id: '8798456807'
+  discord:
+    enabled: true
