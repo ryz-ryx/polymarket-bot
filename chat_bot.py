@@ -141,7 +141,7 @@ async def resolve_pnl() -> str:
     assets = d.get("assets", {})
     port = d.get("portfolio", {})
     lines = []
-    for asset in ["BTC", "ETH", "SOL"]:
+    for asset in ["BTC"]:
         a = assets.get(asset, {})
         r = a.get("risk", {})
         pnl = r.get("daily_pnl", 0)
@@ -163,7 +163,7 @@ async def resolve_circuit() -> str:
     port = d.get("portfolio", {})
     lines = []
     any_tripped = False
-    for asset in ["BTC", "ETH", "SOL"]:
+    for asset in ["BTC"]:
         a = assets.get(asset, {})
         r = a.get("risk", {})
         cb = r.get("circuit_breaker_triggered", False)
@@ -190,7 +190,7 @@ async def resolve_drawdown() -> str:
 
 async def resolve_funnel() -> str:
     parts = []
-    for asset in ["BTC", "ETH", "SOL"]:
+    for asset in ["BTC"]:
         d = await api_get("api/funnel", params={"asset": asset, "window_hours": 4, "baseline_hours": 96})
         if "error" in d:
             parts.append(f"{asset}: error — {d.get('error')}")
@@ -206,7 +206,7 @@ async def resolve_funnel() -> str:
 
 async def resolve_calibration() -> str:
     parts = []
-    for asset in ["BTC", "ETH", "SOL"]:
+    for asset in ["BTC"]:
         d = await api_get("api/calibration", params={"asset": asset})
         if "error" in d:
             parts.append(f"{asset}: error — {d.get('error')}")
@@ -260,7 +260,7 @@ async def resolve_status() -> str:
     assets = d.get("assets", {})
     port = d.get("portfolio", {})
     lines = []
-    for asset in ["BTC", "ETH", "SOL"]:
+    for asset in ["BTC"]:
         a = assets.get(asset, {})
         r = a.get("risk", {})
         cb = r.get("circuit_breaker_triggered", False)

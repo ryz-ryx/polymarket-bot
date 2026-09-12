@@ -142,7 +142,7 @@ def _handle_drawdown():
 
 def _handle_funnel():
     out = []
-    for asset in config.target_assets:
+    for asset in (config.target_asset,):
         d = _get("/api/funnel", asset=asset)
         out.append(
             f"[{asset}] last {d.get('window_hours')}h: {d.get('window_counts')}"
@@ -152,7 +152,7 @@ def _handle_funnel():
 
 def _handle_calibration():
     out = []
-    for asset in config.target_assets:
+    for asset in (config.target_asset,):
         d = _get("/api/calibration", asset=asset)
         beats = "beats market" if d.get("model_better_than_market") else "worse than market"
         out.append(
@@ -164,7 +164,7 @@ def _handle_calibration():
 
 def _handle_trades():
     out = []
-    for asset in config.target_assets:
+    for asset in (config.target_asset,):
         d = _get("/api/recent_trades", asset=asset)
         out.append(f"[{asset}] {d}")
     text = "\n".join(out)

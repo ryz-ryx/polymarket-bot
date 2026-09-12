@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import config
 from src.control_state import read_control_state, write_control_state
 
-ASSET_SUFFIX = {"BTC": "", "ETH": "_eth", "SOL": "_sol"}
+ASSET_SUFFIX = {"BTC": ""}
 
 
 def _safe_float(v, default=0.0):
@@ -205,7 +205,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"dashboard.html not found")
 
     def serve_api_state(self):
-        assets = ["BTC", "ETH", "SOL"]
+        assets = ["BTC"]
         assets_data = {}
         all_fills = []
 
@@ -290,7 +290,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def serve_api_recent_trades(self, query):
         asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
         if asset not in ASSET_SUFFIX:
-            self._send_json({"error": f"unknown asset '{asset}', expected BTC/ETH/SOL"}, status=400)
+            self._send_json({"error": f"unknown asset '{asset}', expected BTC"}, status=400)
             return
         status_filter = query.get("status", ["EXECUTED"])[0]
         limit = min(max(int(_safe_float(query.get("limit", ["20"])[0], 20)), 1), 200)
@@ -332,7 +332,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def serve_api_funnel(self, query):
         asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
         if asset not in ASSET_SUFFIX:
-            self._send_json({"error": f"unknown asset '{asset}', expected BTC/ETH/SOL"}, status=400)
+            self._send_json({"error": f"unknown asset '{asset}', expected BTC"}, status=400)
             return
         window_hours = _safe_float(query.get("window_hours", ["4"])[0], 4.0)
         baseline_hours = _safe_float(query.get("baseline_hours", ["96"])[0], 96.0)
@@ -369,7 +369,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def serve_api_calibration(self, query):
         asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
         if asset not in ASSET_SUFFIX:
-            self._send_json({"error": f"unknown asset '{asset}', expected BTC/ETH/SOL"}, status=400)
+            self._send_json({"error": f"unknown asset '{asset}', expected BTC"}, status=400)
             return
         days = _safe_float(query.get("days", ["7"])[0], 7.0)
         fp = os.path.join(BASE_DIR, "data", f"calibration_log{ASSET_SUFFIX[asset]}.csv")
@@ -435,7 +435,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         """
         asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
         if asset not in ASSET_SUFFIX:
-            self._send_json({"error": f"unknown asset '{asset}', expected BTC/ETH/SOL"}, status=400)
+            self._send_json({"error": f"unknown asset '{asset}', expected BTC"}, status=400)
             return
         days = _safe_float(query.get("days", ["30"])[0], 30.0)
         fp = os.path.join(BASE_DIR, "data", f"calibration_log{ASSET_SUFFIX[asset]}.csv")

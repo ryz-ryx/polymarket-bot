@@ -15,7 +15,6 @@ from src.executor import OrderExecutor
 from src.calibrator import EmpiricalCalibrator
 from src.event_logger import TradeEventLogger, EVENT_LOG
 from src.deribit_feed import DeribitFeed
-from src.coinbase_feed import CoinbaseFeed
 from src.book_ws import PolymarketBookWS
 from src.strategies.claud_quant import ClaudQuantBinaryOptionStrategy, estimate_taker_fee_fraction
 from src.control_state import is_paused
@@ -31,89 +30,52 @@ class AssetTradingEngine:
         self.asset = asset.upper()
         self.book_ws = shared_book_ws
         self.portfolio_circuit_breaker: bool = False
-        
-        asset_suffix = "" if self.asset == "BTC" else f"_{self.asset.lower()}"
-        
-        max_pos = config.get_max_position_usd(self.asset)
-        max_daily_loss = config.get_max_daily_loss_usd(self.asset)
-        risk_file = f"data/risk_state{asset_suffix}.json"
-        
-        self.risk_manager = RiskManager(
-            max_position_usd=max_pos,
-            max_daily_loss_usd=max_daily_loss,
-            kelly_fraction=config.kelly_fraction,
-            state_file=risk_file
-        )
-        
-        pos_file = f"data/open_positions{asset_suffix}.json"
-        self.executor = OrderExecutor(paper_trading=config.paper_trading, state_file=pos_file, asset=self.asset)
-        
-        # Asset-specific parameter tuning
-        # Bias entries toward higher-conviction, skewed prices (away from expensive 50/50 fee zone)
-        if self.asset == "ETH":
-            strat_min_edge = 0.045
-            strat_min_abs_z = 0.50
-            strat_min_dist = 0.0005
-            strat_tail_dof = 4.5
-            strat_min_entry_price = None
-            strat_max_entry_price = None
-        elif self.asset == "SOL":
-            strat_min_edge = 0.03
-            strat_min_abs_z = 0.40
-            strat_min_dist = 0.0003
-            strat_tail_dof = 4.5
-            strat_min_entry_price = None
-            strat_max_entry_price = None
-        else: # BTC
-            strat_min_edge = 0.03
-            strat_min_abs_z = 0.40
-            strat_min_dist = 0.0003
-            strat_tail_dof = None
-            strat_min_entry_price = 0.333
-            strat_max_entry_price = 0.50
 
-        self.strategy = strategy or ClaudQuantBinaryOptionStrategy(
-            min_edge=strat_min_edge,
-            slippage_buffer=config.slippage_tolerance,
-            min_abs_z=strat_min_abs_z,
-            min_strike_distance_pct=strat_min_dist,
-            tail_dof=strat_tail_dof,
-            min_entry_price=strat_min_entry_price,
-            max_entry_price=strat_max_entry_price
+        self.risk_manager = RiskManager(
+            max_position_usd=config.max_position_usd,
+            max_daily_loss_usd=config.max_daily_loss_usd,
+            kelly_fraction=config.kelly_fraction,
+            state_file="data/risk_state.json"
         )
-        
+
+        self.executor = OrderExecutor(paper_trading=config.paper_trading, state_file="data/open_positions.json", asset=self.asset)
+
+        # Bias entries toward higher-conviction, skewed prices (away from expensive 50/50 fee zone)
+        self.strategy = strategy or ClaudQuantBinaryOptionStrategy(
+            min_edge=0.03,
+            slippage_buffer=config.slippage_tolerance,
+            min_abs_z=0.40,
+            min_strike_distance_pct=0.0003,
+            tail_dof=None,
+            min_entry_price=0.333,
+            max_entry_price=0.50
+        )
+
         self.market_feed = PolymarketFeed(asset=self.asset, book_ws=self.book_ws)
         self.spot_feed = SpotFeed(symbol=f"{self.asset}USDT")
-        if self.asset in ("BTC", "ETH"):
-            self.deribit_feed = DeribitFeed(currency=self.asset)
-        elif self.asset == "SOL":
-            self.deribit_feed = CoinbaseFeed(currency="SOL")
-        else:
-            self.deribit_feed = None
-        
-        calib_log = f"data/calibration_log{asset_suffix}.csv"
-        calib_obs = f"data/pending_window_observations{asset_suffix}.json"
-        self.calibrator = EmpiricalCalibrator(log_path=calib_log, observations_path=calib_obs)
-        
-        self.event_log_path = f"data/trade_events{asset_suffix}.csv"
+        self.deribit_feed = DeribitFeed(currency=self.asset)
+
+        self.calibrator = EmpiricalCalibrator(log_path="data/calibration_log.csv", observations_path="data/pending_window_observations.json")
+
+        self.event_log_path = "data/trade_events.csv"
         self.event_logger = TradeEventLogger(log_path=self.event_log_path)
         self.last_trade_time = 0.0
-        
+
         self.rollup_history: List[Dict[str, Any]] = []
         self._funnel_tally: Dict[str, int] = {}
-        
+
         self.current_window_id = int(time.time() // 300)
         self.current_window_start = self.current_window_id * 300
         self.strike_price = None
-        
-        self.resolutions_file = f"data/pending_resolutions{asset_suffix}.json"
+
+        self.resolutions_file = "data/pending_resolutions.json"
         self.pending_resolutions: List[Dict[str, Any]] = []
         self._load_pending_resolutions()
-        
-        self.reconciliation_file = f"data/fallback_reconciliation{asset_suffix}.json"
+
+        self.reconciliation_file = "data/fallback_reconciliation.json"
         self.fallback_reconciliation: List[Dict[str, Any]] = []
         self._load_fallback_reconciliation()
-        
+
         self.spot_task: Optional[asyncio.Task] = None
         self.deribit_task: Optional[asyncio.Task] = None
     def _load_pending_resolutions(self):
@@ -887,7 +849,7 @@ class AssetTradingEngine:
                             # NOTE: deliberately no `continue` here -- this sits inside the main
                             # 1s tick loop, and a bare `continue` would skip straight back to
                             # `while True`, silently swallowing the periodic status-line /
-                            # ETH-SOL-DVOL telemetry block below for that tick. That's exactly
+                            # DVOL telemetry block below for that tick. That's exactly
                             # the wrong failure mode: thin resting depth (which triggers this
                             # branch) is precisely when that telemetry is most useful to see.
                             # Verified live: a bare `continue` here made the status line vanish
@@ -1018,34 +980,18 @@ class AssetTradingEngine:
 
 class Polymarket5mBot:
     def __init__(self):
-        self.strategies = {
-            asset: ClaudQuantBinaryOptionStrategy(
-                min_edge=0.045 if asset == "ETH" else 0.03,
-                slippage_buffer=config.slippage_tolerance,
-                min_abs_z=0.50 if asset == "ETH" else 0.40,
-                min_strike_distance_pct=0.0005 if asset == "ETH" else 0.0003,
-                tail_dof=4.5 if asset in ("ETH", "SOL") else None,
-                min_entry_price=0.333 if asset == "BTC" else None,
-                max_entry_price=0.50 if asset == "BTC" else None,
-            )
-            for asset in config.target_assets
-        }
         self.book_ws = PolymarketBookWS()
-        self.target_assets = config.target_assets
-        self.engines: Dict[str, AssetTradingEngine] = {
-            asset: AssetTradingEngine(asset=asset, shared_book_ws=self.book_ws, strategy=self.strategies[asset])
-            for asset in self.target_assets
-        }
+        self.target_asset = config.target_asset
+        self.engine = AssetTradingEngine(asset=self.target_asset, shared_book_ws=self.book_ws)
         self.portfolio_state_file = "data/risk_state_portfolio.json"
         self.max_portfolio_daily_loss_usd = config.max_portfolio_daily_loss_usd
         self.portfolio_circuit_breaker = False
         self.current_portfolio_day = str(datetime.datetime.now(datetime.timezone.utc).date())
 
-        # Phase 1: Portfolio Max-Drawdown Breaker (Hard stop at total_starting_balance * (1 - max_portfolio_drawdown_pct))
+        # Phase 1: Portfolio Max-Drawdown Breaker (Hard stop at starting_balance * (1 - max_portfolio_drawdown_pct))
         # Unlike daily circuit breaker, this persists permanently until manually cleared.
         self.drawdown_state_file = "data/risk_state_drawdown.json"
-        num_engines = len(self.target_assets)
-        self.starting_balance_usd = config.starting_balance_usd * num_engines
+        self.starting_balance_usd = config.starting_balance_usd
         self.max_drawdown_floor_usd = self.starting_balance_usd * (1.0 - config.max_portfolio_drawdown_pct)
         self.drawdown_breaker_triggered = False
 
@@ -1059,8 +1005,7 @@ class Polymarket5mBot:
                     data = json.load(f)
                 self.drawdown_breaker_triggered = bool(data.get("circuit_breaker_triggered", False))
                 if self.drawdown_breaker_triggered:
-                    for engine in self.engines.values():
-                        engine.portfolio_circuit_breaker = True
+                    self.engine.portfolio_circuit_breaker = True
                     logger.critical(
                         f"RiskManager [DRAWDOWN]: Restored PERMANENT TRIPPED state from {self.drawdown_state_file}. "
                         f"Portfolio balance breached drawdown floor (${self.max_drawdown_floor_usd:.2f}). "
@@ -1096,8 +1041,7 @@ class Polymarket5mBot:
                 if saved_day == today_str:
                     self.current_portfolio_day = today_str
                     self.portfolio_circuit_breaker = bool(data.get("circuit_breaker_triggered", False))
-                    for engine in self.engines.values():
-                        engine.portfolio_circuit_breaker = self.portfolio_circuit_breaker or self.drawdown_breaker_triggered
+                    self.engine.portfolio_circuit_breaker = self.portfolio_circuit_breaker or self.drawdown_breaker_triggered
                     if self.portfolio_circuit_breaker:
                         logger.critical(
                             f"RiskManager [PORTFOLIO]: Restored TRIPPED state from {self.portfolio_state_file}. "
@@ -1106,8 +1050,7 @@ class Polymarket5mBot:
                 else:
                     self.current_portfolio_day = today_str
                     self.portfolio_circuit_breaker = False
-                    for engine in self.engines.values():
-                        engine.portfolio_circuit_breaker = self.drawdown_breaker_triggered
+                    self.engine.portfolio_circuit_breaker = self.drawdown_breaker_triggered
                     self._save_portfolio_state()
             except Exception as e:
                 logger.warning(f"RiskManager [PORTFOLIO]: Failed to load state ({e}). Starting fresh.")
@@ -1119,7 +1062,7 @@ class Polymarket5mBot:
         try:
             os.makedirs(os.path.dirname(self.portfolio_state_file), exist_ok=True)
             tmp_file = f"{self.portfolio_state_file}.tmp"
-            total_pnl = sum(eng.risk_manager.daily_pnl for eng in self.engines.values())
+            total_pnl = self.engine.risk_manager.daily_pnl
             payload = {
                 "current_day": self.current_portfolio_day,
                 "daily_pnl": total_pnl,
@@ -1134,15 +1077,13 @@ class Polymarket5mBot:
             logger.error(f"RiskManager [PORTFOLIO]: Failed to atomically save state: {e}")
 
     def check_portfolio_risk(self):
-        # 1. Check Permanent Max Drawdown Breaker (25% of aggregate starting capital across all engines)
-        # Sums simulated_balance across all asset executors (BTC, ETH, SOL)
-        current_balance = sum(eng.executor.simulated_balance for eng in self.engines.values()) if self.engines else self.starting_balance_usd
-        
+        # 1. Check Permanent Max Drawdown Breaker (25% of starting capital)
+        current_balance = self.engine.executor.simulated_balance
+
         if not self.drawdown_breaker_triggered:
             if current_balance <= self.max_drawdown_floor_usd:
                 self.drawdown_breaker_triggered = True
-                for engine in self.engines.values():
-                    engine.portfolio_circuit_breaker = True
+                self.engine.portfolio_circuit_breaker = True
                 logger.critical(
                     f"🚨 [PORTFOLIO MAX DRAWDOWN BREAKER TRIPPED] Balance ${current_balance:.2f} "
                     f"breached -25% capital floor (${self.max_drawdown_floor_usd:.2f} of ${self.starting_balance_usd:.2f}). "
@@ -1164,86 +1105,78 @@ class Polymarket5mBot:
             )
             self.current_portfolio_day = today_str
             self.portfolio_circuit_breaker = False
-            for engine in self.engines.values():
-                engine.portfolio_circuit_breaker = self.drawdown_breaker_triggered
+            self.engine.portfolio_circuit_breaker = self.drawdown_breaker_triggered
             self._save_portfolio_state()
             return
 
-        total_pnl = sum(eng.risk_manager.daily_pnl for eng in self.engines.values())
+        total_pnl = self.engine.risk_manager.daily_pnl
 
         if not self.portfolio_circuit_breaker:
             if total_pnl <= -self.max_portfolio_daily_loss_usd:
                 self.portfolio_circuit_breaker = True
-                for engine in self.engines.values():
-                    engine.portfolio_circuit_breaker = True
+                self.engine.portfolio_circuit_breaker = True
                 logger.critical(
-                    f"🚨 [PORTFOLIO CIRCUIT BREAKER TRIPPED] Aggregate daily loss across all assets "
+                    f"🚨 [PORTFOLIO CIRCUIT BREAKER TRIPPED] Daily loss "
                     f"reached {total_pnl:.2f} USD (limit: -${self.max_portfolio_daily_loss_usd:.2f}). "
-                    f"HALTING ALL NEW TRADES ACROSS ALL ASSETS FOR TODAY."
+                    f"HALTING ALL NEW TRADES FOR TODAY."
                 )
                 if config.notify_on_trade:
                     notifier.alert(
-                        f"🚨 PORTFOLIO CIRCUIT BREAKER TRIPPED! Combined loss: ${total_pnl:.2f} USD. "
-                        f"All asset engines halted."
+                        f"🚨 PORTFOLIO CIRCUIT BREAKER TRIPPED! Loss: ${total_pnl:.2f} USD."
                     )
                 self._save_portfolio_state()
 
     async def run(self):
-        assets_str = ", ".join(self.target_assets)
-        logger.info(f"Starting Polymarket 5-Minute Multi-Asset Bot for: {assets_str}")
+        logger.info(f"Starting Polymarket 5-Minute Bot for: {self.target_asset}")
         logger.info(f"Mode: {'[PAPER TRADING]' if config.paper_trading else '[LIVE EXECUTION]'}")
 
         all_ok = True
-        for asset, engine in self.engines.items():
-            try:
-                reachable = await engine.market_feed.check_connectivity()
-                if not reachable:
-                    all_ok = False
-                    logger.warning(f"Polymarket API connectivity check FAILED for {asset}.")
-            except Exception as e:
-                logger.error(f"Error during connectivity check for {asset}: {e}")
+        try:
+            reachable = await self.engine.market_feed.check_connectivity()
+            if not reachable:
                 all_ok = False
+                logger.warning(f"Polymarket API connectivity check FAILED for {self.target_asset}.")
+        except Exception as e:
+            logger.error(f"Error during connectivity check for {self.target_asset}: {e}")
+            all_ok = False
 
         if not all_ok:
             if config.notify_on_connectivity_failure:
                 notifier.alert(
-                    "🔴 Polymarket5mBot: Connectivity check failed for one or more assets."
+                    "🔴 Polymarket5mBot: Connectivity check failed."
                 )
         elif config.notify_on_startup:
             notifier.alert(
                 f"✅ Polymarket5mBot started ({'PAPER TRADING' if config.paper_trading else 'LIVE'}) "
-                f"| Assets: {assets_str} | Polymarket connectivity OK."
+                f"| Asset: {self.target_asset} | Polymarket connectivity OK."
             )
 
         self.book_ws.start()
-        for engine in self.engines.values():
-            engine.spot_task = asyncio.create_task(engine.spot_feed.start())
-            if engine.deribit_feed is not None:
-                engine.deribit_task = asyncio.create_task(engine.deribit_feed.start())
-            await engine._recover_orphaned_windows()
+        self.engine.spot_task = asyncio.create_task(self.engine.spot_feed.start())
+        if self.engine.deribit_feed is not None:
+            self.engine.deribit_task = asyncio.create_task(self.engine.deribit_feed.start())
+        await self.engine._recover_orphaned_windows()
 
         ticker_task = asyncio.create_task(self._console_ticker())
         portfolio_risk_task = asyncio.create_task(self._portfolio_risk_loop())
-        engine_tasks = [asyncio.create_task(self._run_engine_loop(engine)) for engine in self.engines.values()]
+        engine_task = asyncio.create_task(self._run_engine_loop(self.engine))
 
         try:
-            await asyncio.gather(*engine_tasks)
+            await engine_task
         except asyncio.CancelledError:
             logger.info("Bot shutting down...")
         finally:
             ticker_task.cancel()
             portfolio_risk_task.cancel()
-            for task in engine_tasks:
-                task.cancel()
-            for engine in self.engines.values():
-                engine.spot_feed.stop()
-                if engine.spot_task is not None:
-                    engine.spot_task.cancel()
-                if engine.deribit_feed is not None:
-                    await engine.deribit_feed.stop()
-                if engine.deribit_task is not None:
-                    engine.deribit_task.cancel()
-                await engine.market_feed.close()
+            engine_task.cancel()
+            self.engine.spot_feed.stop()
+            if self.engine.spot_task is not None:
+                self.engine.spot_task.cancel()
+            if self.engine.deribit_feed is not None:
+                await self.engine.deribit_feed.stop()
+            if self.engine.deribit_task is not None:
+                self.engine.deribit_task.cancel()
+            await self.engine.market_feed.close()
             await self.book_ws.stop()
             await notifier.close()
 
@@ -1276,21 +1209,17 @@ class Polymarket5mBot:
         while True:
             await asyncio.sleep(0.1)
             try:
-                parts = []
                 now = time.time()
-                for asset, engine in self.engines.items():
-                    spot = engine.spot_feed.latest_price
-                    k = engine.strike_price
-                    if spot is None or k is None:
-                        continue
+                engine = self.engine
+                spot = engine.spot_feed.latest_price
+                k = engine.strike_price
+                if spot is not None and k is not None:
                     tau = max(0.0, engine.current_window_start + 300 - now)
                     yes_book = self.book_ws.get_book(engine.market_feed.token_id_yes)
                     no_book = self.book_ws.get_book(engine.market_feed.token_id_no)
                     yes_ask = f"{yes_book['best_ask']:.2f}" if yes_book and yes_book.get('best_ask') is not None else "..."
                     no_ask = f"{no_book['best_ask']:.2f}" if no_book and no_book.get('best_ask') is not None else "..."
-                    parts.append(f"{asset}: ${spot:,.1f} (K:${k:,.1f}|t:{tau:.0f}s|Y:{yes_ask}|N:{no_ask})")
-                if parts:
-                    line = "  [live] " + " | ".join(parts) + "   "
+                    line = f"  [live] {engine.asset}: ${spot:,.1f} (K:${k:,.1f}|t:{tau:.0f}s|Y:{yes_ask}|N:{no_ask})   "
                     print(f"\r{line}", end="", flush=True)
             except Exception:
                 continue

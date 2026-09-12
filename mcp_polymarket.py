@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
-"""
-MCP server wrapping the polymarket-bot API endpoints.
-
-Hermes spawns this as a stdio MCP subprocess; tools appear as
-mcp_polymarket_* in every platform toolset (Telegram, Discord, etc.).
-
-Endpoints:
-  GET  /api/state
-  GET  /api/drawdown
-  GET  /api/funnel?asset=BTC
-  GET  /api/calibration?asset=BTC
-  GET  /api/recent_trades?asset=BTC&status=EXECUTED&limit=20
-  GET  /api/logs?lines=N
-  POST /api/control  (needs X-Control-Secret header)
-
-Secrets: CONTROL_SECRET is read from the CONTROL_SECRET env var
-(set in Hermes's config.yaml env key or the system env).
-"""
+"""MCP server for polymarket-bot API endpoints."""
 
 from __future__ import annotations
 
@@ -24,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import urllib.request
 import urllib.error
 from typing import Any
@@ -31,12 +15,11 @@ from typing import Any
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("mcp.polymarket")
 
-# MCP availability check
-_MCP_SERVER_AVAILABLE = False
+_MCP_AVAILABLE = False
 MCPServer = None
 try:
     from mcp.server import MCPServer
-    _MCP_SERVER_AVAILABLE = True
+    _MCP_AVAILABLE = True
 except ImportError:
     pass
 
@@ -61,14 +44,14 @@ def _get(path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         return {"error": str(e)}
 
 
-def _post(path: str, body: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+def _post(path: str, body: dict[str, Any], hdrs: dict[str, str] | None = None) -> dict[str, Any]:
     url = f"{BASE}{path}"
     data = json.dumps(body).encode("utf-8")
-    hdrs = {"Content-Type": "application/json"}
-    if headers:
-        hdrs.update(headers)
+    headers = {"Content-Type": "application/json"}
+    if hdrs:
+        headers.update(hdrs)
     log.info("POST %s body=%s", url, body)
-    req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())
@@ -81,78 +64,13 @@ def _post(path: str, body: dict[str, Any], headers: dict[str, str] | None = None
 
 def _tools() -> list[dict[str, Any]]:
     return [
-        {
-            "name": "polymarket_state",
-            "description": "Get current portfolio state, asset PnL, circuit breakers, and positions.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-        {
-            "name": "polymarket_drawdown",
-            "description": "Check if the drawdown breaker is tripped.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-        {
-            "name": "polymarket_funnel",
-            "description": "Get funnel stats for an asset (phantom rate, blocked signals).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "asset": {"type": "string", "default": "BTC", "description": "Asset symbol (BTC, ETH, SOL)"},
-                    "window_hours": {"type": "integer", "default": 4, "description": "Window in hours"},
-                    "baseline_hours": {"type": "integer", "default": 96, "description": "Baseline in hours"},
-                },
-            },
-        },
-        {
-            "name": "polymarket_calibration",
-            "description": "Get model calibration stats (Brier scores) for an asset.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "asset": {"type": "string", "default": "BTC", "description": "Asset symbol"},
-                },
-            },
-        },
-        {
-            "name": "polymarket_recent_trades",
-            "description": "Get recent executed trades for an asset.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "asset": {"type": "string", "default": "BTC", "description": "Asset symbol"},
-                    "status": {"type": "string", "default": "EXECUTED", "description": "Trade status filter"},
-                    "limit": {"type": "integer", "default": 20, "description": "Max trades to return"},
-                },
-            },
-        },
-        {
-            "name": "polymarket_logs",
-            "description": "Get recent log lines from the bot.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "lines": {"type": "integer", "default": 40, "description": "Number of lines (1-200)"},
-                },
-            },
-        },
-        {
-            "name": "polymarket_control",
-            "description": "Pause or resume the bot (requires CONTROL_SECRET).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "paused": {"type": "boolean", "description": "True to pause, False to resume"},
-                    "updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"},
-                },
-                "required": ["paused"],
-            },
-        },
+        {"name": "polymarket_state", "description": "Get current portfolio state, asset PnL, circuit breakers, and positions.", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "polymarket_drawdown", "description": "Check if the drawdown breaker is tripped.", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "polymarket_funnel", "description": "Get funnel stats for an asset (phantom rate, blocked signals).", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol (BTC)"}, "window_hours": {"type": "integer", "default": 4, "description": "Window in hours"}, "baseline_hours": {"type": "integer", "default": 96, "description": "Baseline in hours"}}}},
+        {"name": "polymarket_calibration", "description": "Get model calibration stats (Brier scores) for an asset.", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol"}}}},
+        {"name": "polymarket_recent_trades", "description": "Get recent executed trades for an asset.", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol"}, "status": {"type": "string", "default": "EXECUTED", "description": "Trade status filter"}, "limit": {"type": "integer", "default": 20, "description": "Max trades to return"}}}},
+        {"name": "polymarket_logs", "description": "Get recent log lines from the bot.", "inputSchema": {"type": "object", "properties": {"lines": {"type": "integer", "default": 40, "description": "Number of lines (1-200)"}}}},
+        {"name": "polymarket_control", "description": "Pause or resume the bot (requires CONTROL_SECRET).", "inputSchema": {"type": "object", "properties": {"paused": {"type": "boolean", "description": "True to pause, False to resume"}, "updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}, "required": ["paused"]}},
     ]
 
 
@@ -172,15 +90,13 @@ def _call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         return _get("/api/logs", {"lines": str(args.get("lines", 40))})
     if name == "polymarket_control":
         if not CONTROL_SECRET:
-            return {"error": "CONTROL_SECRET not configured — set it in Hermes's env or config.yaml"}
-        return _post("/api/control", {"paused": args["paused"], "updated_by": args.get("updated_by", "hermes")}, headers={"X-Control-Secret": CONTROL_SECRET})
+            return {"error": "CONTROL_SECRET not configured"}
+        return _post("/api/control", {"paused": args.get("paused", False), "updated_by": args.get("updated_by", "hermes")}, hdrs={"X-Control-Secret": CONTROL_SECRET})
     return {"error": f"Unknown tool: {name}"}
 
 
-# --- MCP stdio server -------------------------------------------------------
-
 def main() -> None:
-    if not _MCP_SERVER_AVAILABLE:
+    if not _MCP_AVAILABLE:
         log.error("mcp package not installed — run: pip install mcp")
         sys.exit(1)
 
@@ -223,7 +139,7 @@ def main() -> None:
 
     log.info("polymarket MCP server starting — tools: %s", [t["name"] for t in _tools()])
 
-    async def _run():
+    async def _run() -> None:
         try:
             await server.run_stdio_async()
         finally:

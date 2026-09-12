@@ -38,7 +38,7 @@
         }
         .grid-3 {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: minmax(0, 420px);
             gap: 16px;
             margin-bottom: 16px;
         }
@@ -241,62 +241,6 @@
                 <div id="btc-positions">None</div>
             </div>
         </div>
-
-        <!-- ETH -->
-        <div class="card" id="card-eth">
-            <div class="card-header">
-                <span>[ ASSET: ETH ]</span>
-                <span id="eth-breaker">ACTIVE</span>
-            </div>
-            <div class="stat-line">
-                <span class="stat-label">WALLET CASH</span>
-                <span class="stat-value" id="eth-cash">$0.00</span>
-            </div>
-            <div class="stat-line">
-                <span class="stat-label">DAY PNL</span>
-                <span class="stat-value" id="eth-pnl">$0.00</span>
-            </div>
-            <div class="stat-line">
-                <span class="stat-label">MODEL CONFIDENCE</span>
-                <span class="stat-value" id="eth-conf">1.00</span>
-            </div>
-            <div class="stat-line">
-                <span class="stat-label">ACTIVE TRADES</span>
-                <span class="stat-value" id="eth-pos-count">0</span>
-            </div>
-            <div class="positions-box">
-                <div style="color: #888; font-size: 11px; margin-bottom: 4px;">CURRENT IN-FLIGHT POSITIONS:</div>
-                <div id="eth-positions">None</div>
-            </div>
-        </div>
-
-        <!-- SOL -->
-        <div class="card" id="card-sol">
-            <div class="card-header">
-                <span>[ ASSET: SOL ]</span>
-                <span id="sol-breaker">ACTIVE</span>
-            </div>
-            <div class="stat-line">
-                <span class="stat-label">WALLET CASH</span>
-                <span class="stat-value" id="sol-cash">$0.00</span>
-            </div>
-            <div class="stat-line">
-                <span class="stat-label">DAY PNL</span>
-                <span class="stat-value" id="sol-pnl">$0.00</span>
-            </div>
-            <div class="stat-line">
-                <span class="stat-label">MODEL CONFIDENCE</span>
-                <span class="stat-value" id="sol-conf">1.00</span>
-            </div>
-            <div class="stat-line">
-                <span class="stat-label">ACTIVE TRADES</span>
-                <span class="stat-value" id="sol-pos-count">0</span>
-            </div>
-            <div class="positions-box">
-                <div style="color: #888; font-size: 11px; margin-bottom: 4px;">CURRENT IN-FLIGHT POSITIONS:</div>
-                <div id="sol-positions">None</div>
-            </div>
-        </div>
     </div>
 
     <div class="feed-section">
@@ -371,8 +315,8 @@
                     breakerBadge.style.borderStyle = portBreaker ? 'dashed' : 'solid';
                 }
 
-                // Assets: BTC, ETH, SOL
-                ['btc', 'eth', 'sol'].forEach(asset => {
+                // Assets: BTC
+                ['btc'].forEach(asset => {
                     const info = data.assets[asset.toUpperCase()] || {};
                     const risk = info.risk || {};
                     const pos = info.positions || {};

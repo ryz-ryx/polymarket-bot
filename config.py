@@ -1,5 +1,4 @@
 import os
-from typing import List
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
@@ -16,16 +15,7 @@ class BotConfig(BaseModel):
     clob_api_host: str = os.getenv("CLOB_API_HOST", "https://clob.polymarket.com")
     clob_ws_host: str = os.getenv("CLOB_WS_HOST", "wss://ws-subscriptions-clob.polymarket.com/ws/market")
     
-    target_asset: str = os.getenv("TARGET_ASSET", "BTC").upper()
-
-    @property
-    def target_assets(self) -> List[str]:
-        raw = os.getenv("TARGET_ASSETS")
-        if raw:
-            assets = [a.strip().upper() for a in raw.split(",") if a.strip()]
-            if assets:
-                return assets
-        return ["BTC", "ETH", "SOL"]
+    target_asset: str = "BTC"
 
     starting_balance_usd: float = float(os.getenv("STARTING_BALANCE_USD", "70.0"))
     max_portfolio_drawdown_pct: float = float(os.getenv("MAX_PORTFOLIO_DRAWDOWN_PCT", "0.25"))
@@ -35,27 +25,6 @@ class BotConfig(BaseModel):
     slippage_tolerance: float = float(os.getenv("SLIPPAGE_TOLERANCE", "0.02"))
     kelly_fraction: float = float(os.getenv("KELLY_FRACTION", "0.125"))
     spot_exchange: str = os.getenv("SPOT_EXCHANGE", "binance").lower()
-
-    def get_max_position_usd(self, asset: str) -> float:
-        env_val = os.getenv(f"MAX_POSITION_USD_{asset.upper()}")
-        if env_val:
-            try:
-                return float(env_val)
-            except ValueError:
-                pass
-        return self.max_position_usd
-
-    def get_max_daily_loss_usd(self, asset: str) -> float:
-        env_val = os.getenv(f"MAX_DAILY_LOSS_USD_{asset.upper()}")
-        if env_val:
-            try:
-                return float(env_val)
-            except ValueError:
-                pass
-        # By default, cap ETH at $5.00 daily loss to prevent dragging down portfolio circuit breaker
-        if asset.upper() == "ETH":
-            return min(self.max_daily_loss_usd, 5.0)
-        return self.max_daily_loss_usd
 
     # Discord / Telegram alerts (both optional -- unset means that channel is silently
     # disabled). Never commit real values here; put them in your local .env only.
