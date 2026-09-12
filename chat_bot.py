@@ -278,14 +278,13 @@ async def resolve_balance() -> str:
     d = await api_get("api/state")
     if "error" in d:
         return f"Error fetching state: {d.get('error')}"
-    port = d.get("portfolio", {})
-    cash = port.get("balance", port.get("simulated_balance", "N/A"))
-    total_pnl = port.get("daily_pnl", 0)
+    cash = d.get("assets", {}).get("BTC", {}).get("positions", {}).get("simulated_balance", "N/A")
+    total_pnl = d.get("portfolio", {}).get("daily_pnl", 0)
     try:
         cash_str = f"${float(cash):,.2f}"
     except (TypeError, ValueError):
         cash_str = str(cash)
-    return f"Portfolio balance: {cash_str} | Daily PnL: ${total_pnl:+.2f}"
+    return f"BTC balance: {cash_str} | Daily PnL: ${total_pnl:+.2f}"
 
 
 async def resolve_control(text: str) -> str:
