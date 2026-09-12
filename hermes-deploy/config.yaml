@@ -1,6 +1,8 @@
 model:
-  default: openai/gpt-4o-mini
-  provider: openrouter
+  default: gpt-4o-mini
+  provider: copilot
+  base_url: https://api.githubcopilot.com
+  api_mode: chat_completions
 group_sessions_per_user: true
 mcp_servers:
   polymarket:
