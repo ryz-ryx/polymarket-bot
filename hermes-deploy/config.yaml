@@ -1,3 +1,4 @@
+_config_version: 42
 model:
   default: gpt-4o-mini
   provider: copilot

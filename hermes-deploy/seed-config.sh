@@ -1,11 +1,11 @@
 #!/command/with-contenv sh
 # Runs before 01-hermes-setup (lexical s6-overlay cont-init.d ordering).
-# Seeds our config.yaml into the persistent volume ONLY on first boot --
-# never overwrites it once it exists, so later in-app config changes
-# (model swaps, mcp_servers edits via `hermes config`) survive restarts.
+# Always overwrites config.yaml with our tracked template on every boot --
+# this deploy's config.yaml (in git) is the single source of truth. Model/
+# platform/mcp_servers changes belong in hermes-deploy/config.yaml, not made
+# ad hoc inside the running container (those would be silently lost anyway
+# on the next redeploy).
 set -eu
 HOME_DIR="${HERMES_HOME:-/opt/data}"
 mkdir -p "$HOME_DIR"
-if [ ! -f "$HOME_DIR/config.yaml" ]; then
-    cp /opt/hermes-template/config.yaml "$HOME_DIR/config.yaml"
-fi
+cp /opt/hermes-template/config.yaml "$HOME_DIR/config.yaml"
