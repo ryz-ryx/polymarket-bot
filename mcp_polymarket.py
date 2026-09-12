@@ -65,12 +65,16 @@ def _post(path: str, body: dict[str, Any], hdrs: dict[str, str] | None = None) -
 def _tools() -> list[dict[str, Any]]:
     return [
         {"name": "polymarket_state", "description": "Get current portfolio state, asset PnL, circuit breakers, and positions.", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "polymarket_pnl", "description": "Get just the PnL numbers: balance, daily PnL, and confidence weight (how much the model's own probability is currently being trusted vs the market's).", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "polymarket_summary", "description": "One consolidated human-readable status digest: balance, PnL, confidence weight, calibration maturity, model-vs-market Brier, and whether any circuit breaker is tripped. Use this for a general 'how's it going' / 'give me a summary' request instead of calling state+calibration+drawdown separately.", "inputSchema": {"type": "object", "properties": {}}},
         {"name": "polymarket_drawdown", "description": "Check if the drawdown breaker is tripped.", "inputSchema": {"type": "object", "properties": {}}},
         {"name": "polymarket_funnel", "description": "Get funnel stats for an asset (phantom rate, blocked signals).", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol (BTC)"}, "window_hours": {"type": "integer", "default": 4, "description": "Window in hours"}, "baseline_hours": {"type": "integer", "default": 96, "description": "Baseline in hours"}}}},
         {"name": "polymarket_calibration", "description": "Get model calibration stats (Brier scores) for an asset.", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol"}}}},
         {"name": "polymarket_recent_trades", "description": "Get recent executed trades for an asset.", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol"}, "status": {"type": "string", "default": "EXECUTED", "description": "Trade status filter"}, "limit": {"type": "integer", "default": 20, "description": "Max trades to return"}}}},
         {"name": "polymarket_logs", "description": "Get recent log lines from the bot.", "inputSchema": {"type": "object", "properties": {"lines": {"type": "integer", "default": 40, "description": "Number of lines (1-200)"}}}},
-        {"name": "polymarket_control", "description": "Pause or resume the bot (requires CONTROL_SECRET).", "inputSchema": {"type": "object", "properties": {"paused": {"type": "boolean", "description": "True to pause, False to resume"}, "updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}, "required": ["paused"]}},
+        {"name": "polymarket_control", "description": "Pause or resume the bot (requires CONTROL_SECRET). Prefer polymarket_pause / polymarket_start for clearer intent.", "inputSchema": {"type": "object", "properties": {"paused": {"type": "boolean", "description": "True to pause, False to resume"}, "updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}, "required": ["paused"]}},
+        {"name": "polymarket_pause", "description": "Pause the bot (stops opening new trades; requires CONTROL_SECRET).", "inputSchema": {"type": "object", "properties": {"updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}}},
+        {"name": "polymarket_start", "description": "Resume/start the bot after a pause (requires CONTROL_SECRET).", "inputSchema": {"type": "object", "properties": {"updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}}},
     ]
 
 
@@ -78,6 +82,37 @@ def _call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     args = arguments or {}
     if name == "polymarket_state":
         return _get("/api/state")
+    if name == "polymarket_pnl":
+        state = _get("/api/state")
+        if "error" in state:
+            return state
+        btc = state.get("assets", {}).get("BTC", {})
+        return {
+            "balance_usd": btc.get("positions", {}).get("simulated_balance"),
+            "daily_pnl_usd": btc.get("risk", {}).get("daily_pnl"),
+            "confidence_weight": btc.get("confidence_weight"),
+            "circuit_breaker_triggered": btc.get("risk", {}).get("circuit_breaker_triggered"),
+            "current_day": btc.get("risk", {}).get("current_day"),
+        }
+    if name == "polymarket_summary":
+        state = _get("/api/state")
+        calib = _get("/api/calibration", {"asset": "BTC"})
+        drawdown = _get("/api/drawdown")
+        if "error" in state:
+            return state
+        btc = state.get("assets", {}).get("BTC", {})
+        return {
+            "balance_usd": btc.get("positions", {}).get("simulated_balance"),
+            "daily_pnl_usd": btc.get("risk", {}).get("daily_pnl"),
+            "confidence_weight": btc.get("confidence_weight"),
+            "daily_circuit_breaker_triggered": btc.get("risk", {}).get("circuit_breaker_triggered"),
+            "drawdown_breaker_tripped": drawdown.get("tripped") if "error" not in drawdown else None,
+            "calibration_maturity": calib.get("maturity") if "error" not in calib else None,
+            "model_brier": calib.get("model_brier") if "error" not in calib else None,
+            "market_brier": calib.get("market_brier") if "error" not in calib else None,
+            "model_better_than_market": calib.get("model_better_than_market") if "error" not in calib else None,
+            "recent_fills": state.get("fills", [])[:5],
+        }
     if name == "polymarket_drawdown":
         return _get("/api/drawdown")
     if name == "polymarket_funnel":
@@ -92,6 +127,14 @@ def _call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         if not CONTROL_SECRET:
             return {"error": "CONTROL_SECRET not configured"}
         return _post("/api/control", {"paused": args.get("paused", False), "updated_by": args.get("updated_by", "hermes")}, hdrs={"X-Control-Secret": CONTROL_SECRET})
+    if name == "polymarket_pause":
+        if not CONTROL_SECRET:
+            return {"error": "CONTROL_SECRET not configured"}
+        return _post("/api/control", {"paused": True, "updated_by": args.get("updated_by", "hermes")}, hdrs={"X-Control-Secret": CONTROL_SECRET})
+    if name == "polymarket_start":
+        if not CONTROL_SECRET:
+            return {"error": "CONTROL_SECRET not configured"}
+        return _post("/api/control", {"paused": False, "updated_by": args.get("updated_by", "hermes")}, hdrs={"X-Control-Secret": CONTROL_SECRET})
     return {"error": f"Unknown tool: {name}"}
 
 
@@ -106,6 +149,16 @@ def main() -> None:
     def polymarket_state() -> dict[str, Any]:
         """Get current portfolio state, asset PnL, circuit breakers, and positions."""
         return _call_tool("polymarket_state", {})
+
+    @server.tool()
+    def polymarket_pnl() -> dict[str, Any]:
+        """Get just the PnL numbers: balance, daily PnL, confidence weight."""
+        return _call_tool("polymarket_pnl", {})
+
+    @server.tool()
+    def polymarket_summary() -> dict[str, Any]:
+        """One consolidated status digest: balance, PnL, confidence weight, calibration maturity, model-vs-market Brier, breaker status."""
+        return _call_tool("polymarket_summary", {})
 
     @server.tool()
     def polymarket_drawdown() -> dict[str, Any]:
@@ -136,6 +189,16 @@ def main() -> None:
     def polymarket_control(paused: bool, updated_by: str = "hermes") -> dict[str, Any]:
         """Pause or resume the bot."""
         return _call_tool("polymarket_control", {"paused": paused, "updated_by": updated_by})
+
+    @server.tool()
+    def polymarket_pause(updated_by: str = "hermes") -> dict[str, Any]:
+        """Pause the bot (stops opening new trades)."""
+        return _call_tool("polymarket_pause", {"updated_by": updated_by})
+
+    @server.tool()
+    def polymarket_start(updated_by: str = "hermes") -> dict[str, Any]:
+        """Resume/start the bot after a pause."""
+        return _call_tool("polymarket_start", {"updated_by": updated_by})
 
     log.info("polymarket MCP server starting — tools: %s", [t["name"] for t in _tools()])
 
