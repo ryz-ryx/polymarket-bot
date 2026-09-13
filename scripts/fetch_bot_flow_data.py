@@ -59,23 +59,35 @@ def get_trades(condition_id: str, limit: int = 500):
 
 
 def aggregate_trades(trades):
-    """Collapse a raw trade list down to one record per wallet."""
+    """Collapse a raw trade list down to one record per wallet.
+
+    Polymarket's /trades response marks the outcome token as "Up"/"Down"
+    (our YES/NO), separately from "side" (BUY/SELL of that token). A BUY of
+    "Up" is a long-YES position; a SELL of "Up" unwinds/shorts it. Net
+    exposure per outcome = sum(+size for BUY, -size for SELL). Unsigned
+    volume (regardless of side) is kept too, for sizing heuristics.
+    """
     by_wallet = {}
     for t in trades:
         wallet = t.get("proxyWallet")
         if not wallet:
             continue
-        side = (t.get("outcome") or "").upper()
+        outcome = (t.get("outcome") or "").upper()
+        side = (t.get("side") or "").upper()
         size = float(t.get("size") or 0.0)
+        signed_size = size if side == "BUY" else -size
         ts = t.get("timestamp")
         rec = by_wallet.setdefault(wallet, {
-            "wallet": wallet, "yes_size": 0.0, "no_size": 0.0,
+            "wallet": wallet, "yes_net": 0.0, "no_net": 0.0,
+            "yes_volume": 0.0, "no_volume": 0.0,
             "trade_count": 0, "first_ts": ts, "last_ts": ts,
         })
-        if side == "YES":
-            rec["yes_size"] += size
-        elif side == "NO":
-            rec["no_size"] += size
+        if outcome == "UP":
+            rec["yes_net"] += signed_size
+            rec["yes_volume"] += size
+        elif outcome == "DOWN":
+            rec["no_net"] += signed_size
+            rec["no_volume"] += size
         rec["trade_count"] += 1
         if ts is not None:
             if rec["first_ts"] is None or ts < rec["first_ts"]:
