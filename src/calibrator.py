@@ -27,9 +27,11 @@ class EmpiricalCalibrator:
         log_path: str = LOG_FILE,
         observations_path: str = OBSERVATIONS_FILE,
         pretrained_path: Optional[str] = None,
+        backtest_log_path: Optional[str] = None,
     ):
         self.log_path = log_path
         self.observations_path = observations_path
+        self.backtest_log_path = backtest_log_path
         self.pending_window_observations: List[Dict[str, Any]] = []
         self.isotonic_model: Optional[IsotonicRegression] = None
         self.platt_model: Optional[LogisticRegression] = None
@@ -306,18 +308,49 @@ class EmpiricalCalibrator:
             )
         return corrected
 
-    def fit_calibration_curve(self, min_distinct_windows: int = 30) -> bool:
+    def _load_backtest_samples(self) -> Tuple[List[float], List[int]]:
         """
-        Fits isotonic regression only when we have at least min_distinct_windows independent trials,
-        and both classes (UP and DOWN) have been observed.
-        Samples 1 representative mid-window observation (tau nearest 150s) per window
+        Loads the downloaded-data (backtest.py) samples used as additional, down-weighted
+        training evidence alongside live logged windows -- see fit_calibration_curve(). Each
+        row in the backtest CSV already represents one distinct window (unlike the live log,
+        which has multiple tick rows per window), so no representative-sampling is needed here.
+        """
+        if not self.backtest_log_path or not os.path.exists(self.backtest_log_path):
+            return [], []
+        try:
+            X_bt, y_bt = [], []
+            with open(self.backtest_log_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    r_up = row.get("realized_up")
+                    if r_up in ("0", "1"):
+                        X_bt.append(float(row["p_model"]))
+                        y_bt.append(int(r_up))
+            return X_bt, y_bt
+        except Exception as e:
+            logger.warning(f"Calibrator: failed to load backtest samples from {self.backtest_log_path}: {e}")
+            return [], []
+
+    def fit_calibration_curve(self, min_distinct_windows: int = 30, backtest_weight: float = 0.3) -> bool:
+        """
+        Fits isotonic regression only when we have at least min_distinct_windows independent
+        LIVE trials, and both classes (UP and DOWN) have been observed live -- this gate stays
+        live-only so the calibrator never claims readiness purely on downloaded data. Once that
+        gate is passed, the fit itself blends BOTH sources: live logged windows (full weight,
+        since they reflect current live market/microstructure conditions) plus downloaded
+        backtest.py windows (down-weighted via `backtest_weight`, since they're older/offline
+        data) -- rather than the old behavior of using backtest data only as a cold-start
+        prior that got fully discarded the moment live data crossed the threshold. This way a
+        large downloaded history keeps informing the curve even as live data grows, instead of
+        the fit being based on live windows alone.
+        Samples 1 representative mid-window observation (tau nearest 150s) per live window
         to avoid high within-window autocorrelation.
         """
         if not os.path.exists(self.log_path):
             return False
 
         try:
-            # Group rows by window_id
+            # Group live rows by window_id
             window_groups: Dict[str, List[Dict[str, Any]]] = {}
             with open(self.log_path, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
@@ -335,10 +368,10 @@ class EmpiricalCalibrator:
 
             distinct_windows = len(window_groups)
             if distinct_windows < min_distinct_windows:
-                logger.debug(f"Calibrator: {distinct_windows}/{min_distinct_windows} distinct settled windows observed. Isotonic fitting deferred.")
+                logger.debug(f"Calibrator: {distinct_windows}/{min_distinct_windows} distinct settled LIVE windows observed. Fitting deferred.")
                 return False
 
-            # Select 1 representative sample per window (closest to midpoint tau = 150s)
+            # Select 1 representative sample per live window (closest to midpoint tau = 150s)
             X_samples = []
             y_samples = []
             for wid, rows in window_groups.items():
@@ -346,34 +379,49 @@ class EmpiricalCalibrator:
                 X_samples.append(best_row["p_model"])
                 y_samples.append(best_row["realized_up"])
 
-            # Require seeing at least one UP and one DOWN window to avoid degenerate flatlines
+            # Require seeing at least one UP and one DOWN live window to avoid degenerate flatlines
             unique_outcomes = set(y_samples)
             if len(unique_outcomes) < 2:
-                logger.warning("Calibrator: All observed windows had the same outcome! Deferred to prevent degenerate curve.")
+                logger.warning("Calibrator: All observed live windows had the same outcome! Deferred to prevent degenerate curve.")
                 return False
+
+            live_weights = [1.0] * len(X_samples)
+
+            X_bt, y_bt = self._load_backtest_samples()
+            if X_bt:
+                X_samples = X_samples + X_bt
+                y_samples = y_samples + y_bt
+                live_weights = live_weights + [backtest_weight] * len(X_bt)
 
             X = np.array(X_samples)
             y = np.array(y_samples)
-            
-            # Platt (logistic/sigmoid, 2-parameter) scaling prevents overfitting on small datasets (<300 windows).
-            # Switch to non-parametric IsotonicRegression once sample size is sufficiently large (>=300 windows).
+            w = np.array(live_weights)
+
+            # Platt (logistic/sigmoid, 2-parameter) scaling prevents overfitting on small datasets (<300 live windows).
+            # Switch to non-parametric IsotonicRegression once live sample size is sufficiently large (>=300 windows).
             if distinct_windows < 300:
                 p_clamped = np.clip(X, 1e-4, 1.0 - 1e-4)
                 X_logit = logit(p_clamped).reshape(-1, 1)
                 clf = LogisticRegression(C=1.0, solver="lbfgs")
-                clf.fit(X_logit, y)
+                clf.fit(X_logit, y, sample_weight=w)
                 self.platt_model = clf
                 self.isotonic_model = None
                 self.calibration_method = "platt"
                 self.is_fitted = True
-                logger.info(f"Platt (sigmoid) calibration fitted on {distinct_windows} independent windows (Sample size: {len(X_samples)}).")
+                logger.info(
+                    f"Platt (sigmoid) calibration fitted on {distinct_windows} live windows "
+                    f"+ {len(X_bt)} downloaded windows (weight={backtest_weight})."
+                )
             else:
                 self.isotonic_model = IsotonicRegression(y_min=0.05, y_max=0.95, out_of_bounds="clip")
-                self.isotonic_model.fit(X, y)
+                self.isotonic_model.fit(X, y, sample_weight=w)
                 self.platt_model = None
                 self.calibration_method = "isotonic"
                 self.is_fitted = True
-                logger.info(f"Isotonic calibration fitted on {distinct_windows} independent windows (Sample size: {len(X_samples)}).")
+                logger.info(
+                    f"Isotonic calibration fitted on {distinct_windows} live windows "
+                    f"+ {len(X_bt)} downloaded windows (weight={backtest_weight})."
+                )
             return True
         except Exception as e:
             logger.error(f"Failed to fit calibrator: {e}")
