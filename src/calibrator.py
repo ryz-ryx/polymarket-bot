@@ -501,6 +501,15 @@ class EmpiricalCalibrator:
         returns 1.0 below that threshold so early noise can't neuter the model.
         Uses the SAME representative-row-per-window selection (closest tau to
         150s) as fit_calibration_curve(), for consistency.
+
+        Compares the market against the model's CALIBRATED probability (via
+        self.calibrate()), not the raw logged p_model. The raw z-score model is
+        measurably underconfident (its 0.7-0.9 raw-probability bucket resolves
+        UP 93-100% of the time -- real edge it isn't claiming), which inflates
+        its Brier score against the market's more confident, already-calibrated
+        pricing and permanently suppresses this weight. Calibration is exactly
+        what corrects that underconfidence, so judging the model pre-calibration
+        double-penalizes the same miscalibration this method exists to price in.
         """
         if not os.path.exists(self.log_path):
             return 1.0
@@ -529,7 +538,8 @@ class EmpiricalCalibrator:
             for _, rows in window_items:
                 best = min(rows, key=lambda r: abs(float(r["tau_sec"]) - 150.0))
                 y = int(best["realized_up"])
-                model_sq_err.append((float(best["p_model"]) - y) ** 2)
+                calibrated_p = self.calibrate(float(best["p_model"]))
+                model_sq_err.append((calibrated_p - y) ** 2)
                 try:
                     market_sq_err.append((float(best["p_market"]) - y) ** 2)
                 except (ValueError, KeyError, TypeError):

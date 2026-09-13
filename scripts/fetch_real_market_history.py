@@ -90,10 +90,15 @@ def main():
     ap.add_argument("--max-windows", type=int, default=2000)
     ap.add_argument("--max-missing", type=int, default=20)
     ap.add_argument("--sleep", type=float, default=0.15)
+    ap.add_argument("--start-window-ts", type=int, default=None,
+                     help="Resume walking backward from just before this window (e.g. the oldest window already fetched), instead of from now.")
     args = ap.parse_args()
 
-    now_ts = int(time.time())
-    window_ts = (now_ts // 300) * 300 - 300  # last fully-closed window
+    if args.start_window_ts is not None:
+        window_ts = args.start_window_ts - 300
+    else:
+        now_ts = int(time.time())
+        window_ts = (now_ts // 300) * 300 - 300  # last fully-closed window
 
     fetched = 0
     consecutive_missing = 0
