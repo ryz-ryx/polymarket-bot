@@ -24,9 +24,12 @@ class OrderExecutor:
         self.fills_log_path = f"data/fills_log{asset_suffix}.jsonl"
         self.clob_client = None
         self.open_paper_positions: List[Dict[str, Any]] = []
+        self.open_live_positions: List[Dict[str, Any]] = []
+        self.live_positions_file = f"data/open_live_positions{asset_suffix}.json"
         self._default_balance = self.simulated_balance
 
         self._load_positions()
+        self._load_live_positions()
 
         if not self.paper_trading:
             self._init_live_client()
@@ -41,6 +44,30 @@ class OrderExecutor:
                     logger.info(f"OrderExecutor [{self.asset}]: Restored {len(self.open_paper_positions)} open positions from disk. Balance: ${self.simulated_balance:.2f}")
             except Exception as e:
                 logger.error(f"Failed to load positions from disk: {e}")
+
+    def _load_live_positions(self):
+        if os.path.exists(self.live_positions_file):
+            try:
+                with open(self.live_positions_file, "r", encoding="utf-8") as f:
+                    self.open_live_positions = json.load(f).get("positions", [])
+                    if self.open_live_positions:
+                        logger.warning(
+                            f"OrderExecutor [{self.asset}]: Restored {len(self.open_live_positions)} "
+                            f"open LIVE (real-money) positions from disk -- these are not settled "
+                            f"automatically yet, see settle_window_positions()."
+                        )
+            except Exception as e:
+                logger.error(f"Failed to load live positions from disk: {e}")
+
+    def _save_live_positions(self):
+        os.makedirs(os.path.dirname(self.live_positions_file), exist_ok=True)
+        try:
+            tmp_file = f"{self.live_positions_file}.tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump({"positions": self.open_live_positions, "updated_at": time.time()}, f, indent=2)
+            os.replace(tmp_file, self.live_positions_file)
+        except Exception as e:
+            logger.error(f"Failed to persist live positions to disk: {e}")
 
     def _save_positions(self):
         os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
@@ -69,24 +96,60 @@ class OrderExecutor:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds
 
-            creds = None
+            # Level 1 auth (wallet key only) is enough to build+sign orders and derive
+            # API creds. Level 2 auth (API key/secret/passphrase) is required to actually
+            # POST an order or query real balance/allowance -- derive it automatically
+            # from the wallet key if it wasn't supplied via env, rather than requiring
+            # POLY_CLOB_API_KEY/SECRET/PASSPHRASE to be manually provisioned first. This
+            # is the standard Polymarket CLOB bootstrap flow.
+            self.clob_client = ClobClient(
+                host=config.clob_api_host,
+                key=config.poly_private_key,
+                chain_id=config.chain_id,
+            )
+
             if config.poly_clob_api_key:
                 creds = ApiCreds(
                     api_key=config.poly_clob_api_key,
                     api_secret=config.poly_clob_secret,
                     api_passphrase=config.poly_clob_passphrase,
                 )
+            else:
+                creds = self.clob_client.create_or_derive_api_creds()
+                logger.info(f"OrderExecutor [{self.asset}]: Auto-derived Level 2 API creds from wallet key.")
+            self.clob_client.set_api_creds(creds)
 
-            self.clob_client = ClobClient(
-                host=config.clob_api_host,
-                key=config.poly_private_key,
-                chain_id=config.chain_id,
-                creds=creds,
+            logger.warning(
+                f"OrderExecutor [{self.asset}]: Initialized LIVE Polymarket CLOB client "
+                f"(Level 2 auth ready) -- real orders will be submitted for real funds."
             )
-            logger.info("Initialized live Polymarket CLOB client.")
         except Exception as e:
             logger.error(f"Failed to initialize live CLOB client: {e}. Defaulting to Paper Trading.")
             self.paper_trading = True
+            self.clob_client = None
+
+    def get_live_collateral_balance(self) -> Optional[float]:
+        """
+        Real on-chain USDC (collateral) balance + allowance from the CLOB API, in
+        whole USD -- NOT the simulated_balance ledger. Read-only, safe to call anytime
+        a live client is initialized. Returns None if unavailable (no live client, or
+        the request failed) rather than a fake/stale number.
+        """
+        if self.clob_client is None:
+            return None
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            resp = self.clob_client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            raw_balance = resp.get("balance") if isinstance(resp, dict) else None
+            if raw_balance is None:
+                return None
+            # USDC is 6-decimal; the CLOB API returns raw base units as a string.
+            return float(raw_balance) / 1_000_000.0
+        except Exception as e:
+            logger.error(f"OrderExecutor [{self.asset}]: Failed to fetch live collateral balance: {e}")
+            return None
 
     async def execute_trade(
         self,
@@ -155,8 +218,86 @@ class OrderExecutor:
                 "position": position
             }
         else:
-            logger.info(f"[LIVE EXEC] Submitting order: {outcome} for ${amount_usd:.2f} @ {price:.3f}")
-            return {"status": "SUBMITTED_LIVE", "token_id": token_id}
+            if self.clob_client is None:
+                logger.error(
+                    f"[LIVE EXEC BLOCKED] No live CLOB client for {self.asset} -- "
+                    f"cannot place real order (BUY {outcome} ${amount_usd:.2f})."
+                )
+                return {"status": "BLOCKED_NO_LIVE_CLIENT"}
+
+            try:
+                from py_clob_client.clob_types import MarketOrderArgs, OrderType
+                from py_clob_client.order_builder.constants import BUY
+
+                # FOK (Fill-Or-Kill): matches the strategy's own assumption -- it already
+                # walked the book (simulate_walk_book in bot.py) to confirm this size fills
+                # at this price before calling execute_trade at all, so either it fills now
+                # at that confirmed price or the order is killed outright. No resting orders.
+                order_args = MarketOrderArgs(
+                    token_id=token_id,
+                    amount=round(amount_usd, 2),
+                    side=BUY,
+                    price=price,
+                    order_type=OrderType.FOK,
+                )
+                signed_order = self.clob_client.create_market_order(order_args)
+                resp = self.clob_client.post_order(signed_order, OrderType.FOK)
+            except Exception as e:
+                logger.error(
+                    f"[LIVE EXEC ERROR] Order placement failed for {self.asset} "
+                    f"(BUY {outcome} ${amount_usd:.2f} @ {price:.3f}): {type(e).__name__}: {e}"
+                )
+                return {"status": "LIVE_EXEC_ERROR", "error": str(e)}
+
+            success = bool(resp.get("success")) if isinstance(resp, dict) else False
+            if not success:
+                err = resp.get("errorMsg") if isinstance(resp, dict) else str(resp)
+                logger.error(f"[LIVE EXEC REJECTED] {self.asset} order rejected: {err} | raw={resp}")
+                return {"status": "LIVE_EXEC_REJECTED", "error": err, "raw_response": resp}
+
+            order_id = resp.get("orderID") if isinstance(resp, dict) else None
+            now_ts = time.time()
+            position = {
+                "window_id": window_id,
+                "slug": slug,
+                "token_id": token_id,
+                "outcome": outcome,
+                "amount_usd": amount_usd,
+                "price": price,
+                "order_id": order_id,
+                "timestamp": now_ts
+            }
+            # Kept separate from open_paper_positions -- these track real money and
+            # must never be settled/corrected by the paper-settlement math in
+            # settle_window_positions(), which is a simulated-ledger credit, not a
+            # real redemption. Real settlement (claiming payout for a resolved
+            # position) is NOT implemented yet -- see settle_window_positions().
+            self.open_live_positions.append(position)
+            self._save_live_positions()
+
+            self._log_fill({
+                "ts": now_ts,
+                "asset": self.asset,
+                "type": "LIVE_BUY",
+                "window_id": window_id,
+                "slug": slug,
+                "outcome": outcome,
+                "price": price,
+                "size_usd": amount_usd,
+                "order_id": order_id,
+                "raw_response": resp
+            })
+
+            logger.warning(
+                f"[LIVE EXEC FILLED] REAL ORDER: BUY {outcome} (Win {window_id}) | "
+                f"${amount_usd:.2f} @ {price:.3f} | orderID={order_id}"
+            )
+            return {
+                "status": "FILLED_LIVE",
+                "order_id": order_id,
+                "position": position,
+                "raw_response": resp
+            }
 
     def settle_window_positions(
         self,
@@ -165,6 +306,19 @@ class OrderExecutor:
         source: str = "POLYMARKET"
     ) -> float:
         if not self.paper_trading:
+            # NOT a no-op by accident -- real settlement (claiming/redeeming a resolved
+            # position for actual USDC) is genuinely unimplemented. Polymarket requires
+            # an on-chain redeemPositions call against the CTF/NegRiskAdapter contract,
+            # which is a raw web3 transaction, not a CLOB REST endpoint -- unbuilt.
+            # Surface that loudly instead of silently pretending settlement happened.
+            live_here = [p for p in self.open_live_positions if p["window_id"] == window_id]
+            if live_here:
+                logger.critical(
+                    f"[LIVE SETTLEMENT UNIMPLEMENTED] {self.asset} window {window_id} resolved "
+                    f"({'UP' if realized_up == 1 else 'DOWN'}) with {len(live_here)} open real-money "
+                    f"position(s) still tracked -- these are NOT auto-redeemed. Check/claim them "
+                    f"manually on polymarket.com until on-chain redemption is built."
+                )
             return 0.0
 
         settling = [p for p in self.open_paper_positions if p["window_id"] == window_id]
