@@ -1,4 +1,5 @@
 import os
+from typing import List
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
@@ -16,6 +17,11 @@ class BotConfig(BaseModel):
     clob_ws_host: str = os.getenv("CLOB_WS_HOST", "wss://ws-subscriptions-clob.polymarket.com/ws/market")
     
     target_asset: str = "BTC"
+    # Comma-separated list of assets to trade concurrently, e.g. "BTC,ETH,SOL".
+    # Unset (default) preserves existing single-asset behavior (just target_asset).
+    target_assets: List[str] = [
+        a.strip().upper() for a in os.getenv("TARGET_ASSETS", "").split(",") if a.strip()
+    ] or [target_asset]
 
     starting_balance_usd: float = float(os.getenv("STARTING_BALANCE_USD", "70.0"))
     max_portfolio_drawdown_pct: float = float(os.getenv("MAX_PORTFOLIO_DRAWDOWN_PCT", "0.25"))

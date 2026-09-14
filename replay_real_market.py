@@ -9,6 +9,7 @@ klines, same as backtest.py -- there's no historical order-flow/CBI feed
 available, so those two drift inputs are 0.0 here (flagged in output, not
 faked).
 """
+import argparse
 import json
 import math
 import pandas as pd
@@ -17,6 +18,22 @@ from src.strategies.claud_quant import ClaudQuantBinaryOptionStrategy, estimate_
 
 VOL_WINDOW_MIN = 30
 MINUTES_PER_YEAR = 365.25 * 24 * 60
+
+# Strategy params actually deployed in src/bot.py, keyed by asset. BTC's are the
+# production values; ETH/SOL fall back to BTC's until their own real-market
+# replay/sweep justifies asset-specific ones.
+LIVE_STRATEGY_PARAMS = {
+    "BTC": dict(min_edge=0.03, min_abs_z=0.55, tail_dof=None, min_entry_price=0.25, max_entry_price=0.55),
+    "ETH": dict(min_edge=0.03, min_abs_z=0.70, tail_dof=None, min_entry_price=0.15, max_entry_price=0.55),
+    "SOL": dict(min_edge=0.03, min_abs_z=0.70, tail_dof=None, min_entry_price=0.15, max_entry_price=0.55),
+}
+
+
+def asset_paths(asset: str):
+    asset = asset.upper()
+    real_path = "data/real_market_history_btc.jsonl" if asset == "BTC" else f"data/real_market_history_{asset.lower()}.jsonl"
+    spot_path = f"data/cache/{asset}USDT_1m_1095d.csv"
+    return real_path, spot_path
 
 
 def load_real_windows(path: str) -> pd.DataFrame:
@@ -61,13 +78,16 @@ def load_binance_spot(path: str) -> pd.DataFrame:
 
 
 def main():
-    real = load_real_windows("data/real_market_history_btc.jsonl")
-    spot = load_binance_spot("data/cache/BTCUSDT_1m_1095d.csv")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--asset", default="BTC")
+    args = ap.parse_args()
+    asset = args.asset.upper()
 
-    strategy = ClaudQuantBinaryOptionStrategy(
-        min_edge=0.03, min_abs_z=0.40, tail_dof=None,
-        min_entry_price=0.333, max_entry_price=0.50,
-    )
+    real_path, spot_path = asset_paths(asset)
+    real = load_real_windows(real_path)
+    spot = load_binance_spot(spot_path)
+
+    strategy = ClaudQuantBinaryOptionStrategy(**LIVE_STRATEGY_PARAMS.get(asset, LIVE_STRATEGY_PARAMS["BTC"]))
 
     spot_groups = {wts: g.sort_values("minute_idx").reset_index(drop=True) for wts, g in spot.groupby("window_ts")}
 
@@ -134,7 +154,7 @@ def main():
 
     tdf = pd.DataFrame(trades)
     print("=" * 55)
-    print(f"REAL-MARKET REPLAY: {len(real)} real Polymarket windows loaded")
+    print(f"REAL-MARKET REPLAY [{asset}]: {len(real)} real Polymarket windows loaded")
     print(f"Spot data matched: {len(real) - skipped_no_spot}/{len(real)}")
     print(f"NOTE: OFI and CBI drift inputs = 0.0 (no historical order-flow feed available) -- real spot/vol/momentum, real market prices, real fees, real resolutions.")
     print("=" * 55)
@@ -151,7 +171,8 @@ def main():
     print(f"Avg net PnL per trade (per $1 staked): ${avg_pnl_per_trade:.4f}")
     print(f"Brier (model_prob vs realized outcome, trades only): {((tdf['model_prob'] - tdf['won'].astype(int))**2).mean():.4f}")
     print("=" * 55)
-    tdf.to_csv("data/real_market_replay_trades.csv", index=False)
+    out_suffix = "" if asset == "BTC" else f"_{asset.lower()}"
+    tdf.to_csv(f"data/real_market_replay_trades{out_suffix}.csv", index=False)
 
 
 if __name__ == "__main__":

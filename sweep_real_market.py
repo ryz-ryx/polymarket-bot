@@ -4,7 +4,8 @@ replay_real_market.py) -- tests whether widening/narrowing the strategy's
 entry filters finds more real edge without dropping win rate below breakeven,
 instead of guessing at hyperparameters.
 """
-from replay_real_market import load_real_windows, load_binance_spot
+import argparse
+from replay_real_market import load_real_windows, load_binance_spot, asset_paths
 from src.strategies.claud_quant import ClaudQuantBinaryOptionStrategy, estimate_taker_fee_fraction
 import pandas as pd
 
@@ -59,10 +60,41 @@ def run_variant(real, spot_groups, **strategy_kwargs):
     }
 
 
+def run_grid(real, spot_groups, min_trades=20):
+    rows = []
+    for min_edge in (0.02, 0.03, 0.05):
+        for min_abs_z in (0.25, 0.30, 0.40, 0.55, 0.70):
+            for lo, hi in ((0.15, 0.55), (0.20, 0.55), (0.25, 0.55), (0.333, 0.50), (0.30, 0.60), (0.35, 0.65)):
+                r = run_variant(real, spot_groups, min_edge=min_edge, min_abs_z=min_abs_z,
+                                 tail_dof=None, min_entry_price=lo, max_entry_price=hi)
+                rows.append({"min_edge": min_edge, "min_abs_z": min_abs_z,
+                             "min_entry_price": lo, "max_entry_price": hi, **r})
+    df = pd.DataFrame(rows)
+    viable = df[df["n_trades"] >= min_trades].sort_values("total_pnl", ascending=False)
+    print(f"\nFull grid: {len(df)} combos ({min_trades}+ trade combos: {len(viable)})")
+    print("\nTop 10 by total PnL:")
+    print(viable.head(10).to_string(index=False))
+    print("\nTop 10 by avg PnL/trade (min_trades filter still applied):")
+    print(viable.sort_values("avg_pnl", ascending=False).head(10).to_string(index=False))
+    return df
+
+
 def main():
-    real = load_real_windows("data/real_market_history_btc.jsonl")
-    spot = load_binance_spot("data/cache/BTCUSDT_1m_1095d.csv")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--asset", default="BTC")
+    ap.add_argument("--grid", action="store_true", help="run full parameter grid search instead of the fixed named variants")
+    args = ap.parse_args()
+    asset = args.asset.upper()
+
+    real_path, spot_path = asset_paths(asset)
+    real = load_real_windows(real_path)
+    spot = load_binance_spot(spot_path)
     spot_groups = {wts: g.sort_values("minute_idx").reset_index(drop=True) for wts, g in spot.groupby("window_ts")}
+    print(f"Asset: {asset} ({len(real)} real windows loaded from {real_path})")
+
+    if args.grid:
+        run_grid(real, spot_groups)
+        return
 
     variants = {
         "baseline (current live config)": dict(min_edge=0.03, min_abs_z=0.40, tail_dof=None, min_entry_price=0.333, max_entry_price=0.50),

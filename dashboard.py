@@ -14,7 +14,9 @@ from config import config
 from src.control_state import read_control_state, write_control_state
 from src.breaker_reset import request_reset
 
-ASSET_SUFFIX = {"BTC": ""}
+ASSET_SUFFIX = {
+    a: ("" if a == "BTC" else f"_{a.lower()}") for a in config.target_assets
+}
 
 
 def _safe_float(v, default=0.0):
@@ -250,7 +252,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"dashboard.html not found")
 
     def serve_api_state(self):
-        assets = ["BTC"]
+        assets = list(ASSET_SUFFIX.keys())
         assets_data = {}
         all_fills = []
 
@@ -335,7 +337,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def serve_api_recent_trades(self, query):
         asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
         if asset not in ASSET_SUFFIX:
-            self._send_json({"error": f"unknown asset '{asset}', expected BTC"}, status=400)
+            self._send_json({"error": f"unknown asset '{asset}', expected one of {sorted(ASSET_SUFFIX.keys())}"}, status=400)
             return
         status_filter = query.get("status", ["EXECUTED"])[0]
         limit = min(max(int(_safe_float(query.get("limit", ["20"])[0], 20)), 1), 200)
@@ -377,7 +379,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def serve_api_funnel(self, query):
         asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
         if asset not in ASSET_SUFFIX:
-            self._send_json({"error": f"unknown asset '{asset}', expected BTC"}, status=400)
+            self._send_json({"error": f"unknown asset '{asset}', expected one of {sorted(ASSET_SUFFIX.keys())}"}, status=400)
             return
         window_hours = _safe_float(query.get("window_hours", ["4"])[0], 4.0)
         baseline_hours = _safe_float(query.get("baseline_hours", ["96"])[0], 96.0)
@@ -414,7 +416,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def serve_api_calibration(self, query):
         asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
         if asset not in ASSET_SUFFIX:
-            self._send_json({"error": f"unknown asset '{asset}', expected BTC"}, status=400)
+            self._send_json({"error": f"unknown asset '{asset}', expected one of {sorted(ASSET_SUFFIX.keys())}"}, status=400)
             return
         days = _safe_float(query.get("days", ["7"])[0], 7.0)
         fp = os.path.join(BASE_DIR, "data", f"calibration_log{ASSET_SUFFIX[asset]}.csv")
@@ -481,7 +483,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         """
         asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
         if asset not in ASSET_SUFFIX:
-            self._send_json({"error": f"unknown asset '{asset}', expected BTC"}, status=400)
+            self._send_json({"error": f"unknown asset '{asset}', expected one of {sorted(ASSET_SUFFIX.keys())}"}, status=400)
             return
         days = _safe_float(query.get("days", ["30"])[0], 30.0)
         fp = os.path.join(BASE_DIR, "data", f"calibration_log{ASSET_SUFFIX[asset]}.csv")
@@ -642,7 +644,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def serve_healthz(self):
         now = time.time()
         freshest = None
-        for suffix in ("", "_eth", "_sol"):
+        for suffix in ASSET_SUFFIX.values():
             fp = os.path.join(BASE_DIR, "data", f"trade_events{suffix}.csv")
             if os.path.exists(fp):
                 mtime = os.path.getmtime(fp)
