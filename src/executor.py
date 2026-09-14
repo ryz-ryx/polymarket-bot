@@ -15,15 +15,16 @@ class OrderExecutor:
     - Persistent disk-backed open positions (data/open_positions.json) across restarts.
     - Honest deferred settlement math against on-chain outcomePrices.
     """
-    def __init__(self, paper_trading: bool = True, state_file: str = POSITIONS_FILE, asset: str = "BTC"):
+    def __init__(self, paper_trading: bool = True, state_file: str = POSITIONS_FILE, asset: str = "BTC", initial_balance_usd: Optional[float] = None):
         self.paper_trading = paper_trading
         self.asset = asset.upper()
-        self.simulated_balance = config.starting_balance_usd
+        self.simulated_balance = initial_balance_usd if initial_balance_usd is not None else config.starting_balance_usd
         self.state_file = state_file
         asset_suffix = "" if self.asset == "BTC" else f"_{self.asset.lower()}"
         self.fills_log_path = f"data/fills_log{asset_suffix}.jsonl"
         self.clob_client = None
         self.open_paper_positions: List[Dict[str, Any]] = []
+        self._default_balance = self.simulated_balance
 
         self._load_positions()
 
@@ -36,7 +37,7 @@ class OrderExecutor:
                 with open(self.state_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.open_paper_positions = data.get("positions", [])
-                    self.simulated_balance = float(data.get("simulated_balance", config.starting_balance_usd))
+                    self.simulated_balance = float(data.get("simulated_balance", self._default_balance))
                     logger.info(f"OrderExecutor [{self.asset}]: Restored {len(self.open_paper_positions)} open positions from disk. Balance: ${self.simulated_balance:.2f}")
             except Exception as e:
                 logger.error(f"Failed to load positions from disk: {e}")

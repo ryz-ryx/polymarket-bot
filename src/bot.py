@@ -27,7 +27,7 @@ TWAP_SETTLEMENT_WINDOW_SEC = 60.0
 ROLLUP_WINDOW_COUNT = 10
 
 class AssetTradingEngine:
-    def __init__(self, asset: str, shared_book_ws: PolymarketBookWS, strategy: Optional[ClaudQuantBinaryOptionStrategy] = None):
+    def __init__(self, asset: str, shared_book_ws: PolymarketBookWS, strategy: Optional[ClaudQuantBinaryOptionStrategy] = None, initial_balance_usd: Optional[float] = None):
         self.asset = asset.upper()
         self.book_ws = shared_book_ws
         self.portfolio_circuit_breaker: bool = False
@@ -48,7 +48,12 @@ class AssetTradingEngine:
             state_file=f"data/risk_state{file_suffix}.json"
         )
 
-        self.executor = OrderExecutor(paper_trading=config.paper_trading, state_file=f"data/open_positions{file_suffix}.json", asset=self.asset)
+        self.executor = OrderExecutor(
+            paper_trading=config.paper_trading,
+            state_file=f"data/open_positions{file_suffix}.json",
+            asset=self.asset,
+            initial_balance_usd=initial_balance_usd
+        )
 
         # Bias entries toward higher-conviction, skewed prices (away from expensive 50/50 fee zone).
         # Entry band widened 0.333-0.50 -> 0.25-0.55 and min_abs_z raised 0.40 -> 0.55 after
@@ -894,7 +899,16 @@ class AssetTradingEngine:
                         status="BLOCKED_COOLDOWN"
                     )
                 else:
-                    bankroll = self.executor.simulated_balance if config.paper_trading else 500.0
+                    # NOTE: self.executor.simulated_balance is correct here for both modes since
+                    # it's now seeded from this engine's real share of config.starting_balance_usd
+                    # (the actual funded wallet total, split across concurrently-traded assets --
+                    # see Polymarket5mBot.__init__) rather than a fantasy $500 placeholder that
+                    # used to apply whenever paper_trading was False. It still won't reflect real
+                    # fills once live execution actually happens, though: OrderExecutor.execute_trade's
+                    # live branch is a stub (returns SUBMITTED_LIVE without touching simulated_balance
+                    # or querying the on-chain USDC balance) -- real balance tracking for live mode
+                    # is unimplemented and must be built before paper_trading is ever turned off.
+                    bankroll = self.executor.simulated_balance
                     odds = 1.0 / max(exec_price, 0.05)
                     size = self.risk_manager.calculate_position_size(
                         win_probability=signal["estimated_prob"],
@@ -1047,30 +1061,34 @@ class Polymarket5mBot:
     def __init__(self):
         self.book_ws = PolymarketBookWS()
         self.target_assets = config.target_assets or [config.target_asset]
+        # config.starting_balance_usd is the TOTAL real capital across every traded
+        # asset (one funded wallet), not a per-asset allowance -- split it evenly so
+        # N assets don't each get their own independent copy of the whole balance.
+        # Only matters for paper-mode bookkeeping realism today; a real live wallet
+        # only has one on-chain balance regardless of how this is split in-memory.
+        per_asset_balance = config.starting_balance_usd / len(self.target_assets)
         self.engines: List[AssetTradingEngine] = [
-            AssetTradingEngine(asset=a, shared_book_ws=self.book_ws) for a in self.target_assets
+            AssetTradingEngine(asset=a, shared_book_ws=self.book_ws, initial_balance_usd=per_asset_balance)
+            for a in self.target_assets
         ]
         # Kept for back-compat with anything still reading `.engine`/`.target_asset`
         # (e.g. ad-hoc scripts) -- always the first configured asset's engine.
         self.engine = self.engines[0]
         self.target_asset = self.engine.asset
         self.portfolio_state_file = "data/risk_state_portfolio.json"
-        # Same reasoning as starting_balance_usd above: the configured daily-loss
-        # limit was sized for one asset's paper PnL, so scale it by engine count
-        # rather than letting a multi-asset run trip (or fail to trip) at the
-        # wrong threshold.
-        self.max_portfolio_daily_loss_usd = config.max_portfolio_daily_loss_usd * len(self.engines)
+        # Capital is now split (not duplicated) across engines, so the configured
+        # daily-loss limit is already sized against the TOTAL pool -- no per-engine
+        # scaling needed.
+        self.max_portfolio_daily_loss_usd = config.max_portfolio_daily_loss_usd
         self.portfolio_circuit_breaker = False
         self.current_portfolio_day = str(datetime.datetime.now(datetime.timezone.utc).date())
 
         # Phase 1: Portfolio Max-Drawdown Breaker (Hard stop at starting_balance * (1 - max_portfolio_drawdown_pct))
         # Unlike daily circuit breaker, this persists permanently until manually cleared.
         self.drawdown_state_file = "data/risk_state_drawdown.json"
-        # Each AssetTradingEngine's OrderExecutor starts its own paper balance at
-        # config.starting_balance_usd independently -- so the combined portfolio
-        # starting balance (and therefore the drawdown floor) scales with the
-        # number of concurrently-traded assets, not a single asset's balance.
-        self.starting_balance_usd = config.starting_balance_usd * len(self.engines)
+        # config.starting_balance_usd is already the TOTAL pool split across engines
+        # above -- no per-engine scaling here.
+        self.starting_balance_usd = config.starting_balance_usd
         self.max_drawdown_floor_usd = self.starting_balance_usd * (1.0 - config.max_portfolio_drawdown_pct)
         self.drawdown_breaker_triggered = False
 
@@ -1160,10 +1178,9 @@ class Polymarket5mBot:
 
     def check_portfolio_risk(self):
         # 1. Check Permanent Max Drawdown Breaker (25% of starting capital)
-        # Combined across all traded assets -- each engine's simulated_balance
-        # starts at config.starting_balance_usd independently in paper mode, but
-        # the portfolio floor is judged against the SUM so multi-asset trading
-        # can't quietly blow through a per-asset floor that was sized for one.
+        # Each engine holds its own slice of the shared starting_balance_usd pool
+        # (see __init__) -- summing them back up recovers the real total wallet
+        # balance the floor is judged against.
         current_balance = sum(engine.executor.simulated_balance for engine in self.engines)
 
         if not self.drawdown_breaker_triggered:

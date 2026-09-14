@@ -23,7 +23,11 @@ class BotConfig(BaseModel):
         a.strip().upper() for a in os.getenv("TARGET_ASSETS", "").split(",") if a.strip()
     ] or [target_asset]
 
-    starting_balance_usd: float = float(os.getenv("STARTING_BALANCE_USD", "70.0"))
+    # TOTAL capital available across ALL traded assets combined (real funded wallet
+    # balance, not a per-asset allowance) -- e.g. one $25 USDC wallet shared by
+    # BTC/ETH/SOL, not $25 each. bot.py divides this across concurrently-traded
+    # assets rather than giving each its own independent copy of the full amount.
+    starting_balance_usd: float = float(os.getenv("STARTING_BALANCE_USD", "25.0"))
     max_portfolio_drawdown_pct: float = float(os.getenv("MAX_PORTFOLIO_DRAWDOWN_PCT", "0.25"))
     max_position_usd: float = float(os.getenv("MAX_POSITION_USD", "5.0"))
     max_daily_loss_usd: float = float(os.getenv("MAX_DAILY_LOSS_USD", "10.0"))
