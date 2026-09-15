@@ -16,6 +16,7 @@ it never kills the polling loop, and it never touches the trading loop
 directly (it only calls the dashboard's HTTP endpoints, same as the web UI).
 """
 import os
+import re
 import time
 import traceback
 
@@ -163,11 +164,31 @@ def _handle_calibration():
 
 
 def _handle_trades():
+    # Was dumping the raw API response (status_filter/count/requested_limit/
+    # fully_scanned_available_history metadata mixed in as text around the
+    # actual trades) and never overriding the dashboard's default limit=20 --
+    # verified as the cause of both "why can't I see all the trades" (silently
+    # capped at 20) and "the chat talks about irrelevant information" (the
+    # metadata noise). Request a real limit and format only the trades.
     out = []
     for asset in config.target_assets:
-        d = _get("/api/recent_trades", asset=asset)
-        out.append(f"[{asset}] {d}")
-    text = "\n".join(out)
+        d = _get("/api/recent_trades", asset=asset, limit=50)
+        trades = d.get("trades", [])
+        if not trades:
+            out.append(f"[{asset}] No recent trades.")
+            continue
+        lines = [f"[{asset}] last {len(trades)} trades:"]
+        for t in trades[-50:]:
+            ts = t.get("timestamp")
+            when = time.strftime("%m-%d %H:%M", time.gmtime(ts)) if ts else "?"
+            lines.append(
+                f"  {when} {t.get('outcome', '?')} @ {t.get('entry_price', 0):.2f} "
+                f"${t.get('size_usd', 0):.2f} [{t.get('status', '?')}]"
+            )
+        if not d.get("fully_scanned_available_history", True):
+            lines.append(f"  (more history exists beyond this {d.get('requested_limit')}-trade window)")
+        out.append("\n".join(lines))
+    text = "\n\n".join(out)
     return text[:3800]
 
 
@@ -192,6 +213,22 @@ ROUTES = [
 ]
 
 
+def _keyword_matches(keyword: str, text: str) -> bool:
+    """
+    Word-boundary match, not blind substring containment. Blind `keyword in text`
+    let short single-word keys like "cash" or "pnl" fire on ANY message that
+    happened to contain that substring anywhere -- e.g. "why did I lose cash on
+    that trade" would route to the balance handler instead of being recognized
+    as an unrelated question, returning a reply that looks like it's ignoring
+    what was actually asked. Multi-word phrase keys still match as a substring
+    (intentional -- "what is happening" should match inside a longer sentence),
+    only single-word keys get the stricter word-boundary check.
+    """
+    if " " in keyword:
+        return keyword in text
+    return re.search(rf"\b{re.escape(keyword)}\b", text) is not None
+
+
 def _route(text: str) -> str:
     t = text.strip().lower()
     if t in ("pause",):
@@ -203,7 +240,7 @@ def _route(text: str) -> str:
     if t in ("help", "?", "commands"):
         return HELP_TEXT
     for keys, handler in ROUTES:
-        if t in keys or any(k in t for k in keys):
+        if t in keys or any(_keyword_matches(k, t) for k in keys):
             try:
                 return handler()
             except Exception as e:

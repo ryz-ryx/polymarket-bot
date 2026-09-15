@@ -17,6 +17,16 @@ from config import config
 
 _session: Optional[aiohttp.ClientSession] = None
 
+# Every send used to be single-shot: a rate limit (Telegram ~1 msg/sec/chat,
+# Discord webhooks ~30/min) or any transient network blip silently dropped
+# that alert forever, with only a WARNING log line nobody was watching --
+# verified as the cause of "after a while it stops showing trades/PnL" on a
+# busy trading day (every trade + every settlement + a rollup every 10
+# windows adds up fast). Retry a bounded number of times with backoff,
+# honoring a 429's Retry-After header when present, before giving up.
+_MAX_ATTEMPTS = 4
+_BASE_BACKOFF_SEC = 2.0
+
 
 async def _get_session() -> aiohttp.ClientSession:
     global _session
@@ -26,35 +36,65 @@ async def _get_session() -> aiohttp.ClientSession:
 
 
 async def _send_discord(message: str) -> None:
-    try:
-        session = await _get_session()
-        async with session.post(
-            config.discord_webhook_url,
-            json={"content": message[:1900]},
-            timeout=aiohttp.ClientTimeout(total=8),
-        ) as resp:
-            if resp.status not in (200, 204):
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            session = await _get_session()
+            async with session.post(
+                config.discord_webhook_url,
+                json={"content": message[:1900]},
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status in (200, 204):
+                    return
+                retry_after = resp.headers.get("Retry-After")
                 body = await resp.text()
+                if resp.status == 429 and attempt < _MAX_ATTEMPTS:
+                    delay = float(retry_after) if retry_after else _BASE_BACKOFF_SEC * attempt
+                    logger.warning(f"Notifier: Discord rate-limited (attempt {attempt}/{_MAX_ATTEMPTS}), retrying in {delay:.1f}s")
+                    await asyncio.sleep(delay)
+                    continue
                 logger.warning(f"Notifier: Discord webhook HTTP {resp.status}: {body[:200]}")
-    except Exception as e:
-        logger.warning(f"Notifier: Discord send failed: {type(e).__name__}: {e}")
+                return
+        except Exception as e:
+            if attempt < _MAX_ATTEMPTS:
+                logger.warning(f"Notifier: Discord send failed (attempt {attempt}/{_MAX_ATTEMPTS}): {type(e).__name__}: {e}, retrying")
+                await asyncio.sleep(_BASE_BACKOFF_SEC * attempt)
+                continue
+            logger.warning(f"Notifier: Discord send failed permanently after {_MAX_ATTEMPTS} attempts: {type(e).__name__}: {e}")
 
 
 async def _send_telegram(message: str) -> None:
-    try:
-        session = await _get_session()
-        url = f"https://api.telegram.org/bot{config.telegram_bot_token}/sendMessage"
-        payload = {
-            "chat_id": config.telegram_chat_id,
-            "text": message[:4000],
-            "disable_web_page_preview": True,
-        }
-        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-            if resp.status != 200:
+    url = f"https://api.telegram.org/bot{config.telegram_bot_token}/sendMessage"
+    payload = {
+        "chat_id": config.telegram_chat_id,
+        "text": message[:4000],
+        "disable_web_page_preview": True,
+    }
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            session = await _get_session()
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    return
                 body = await resp.text()
+                if resp.status == 429 and attempt < _MAX_ATTEMPTS:
+                    retry_after = None
+                    try:
+                        retry_after = (await resp.json()).get("parameters", {}).get("retry_after")
+                    except Exception:
+                        pass
+                    delay = float(retry_after) if retry_after else _BASE_BACKOFF_SEC * attempt
+                    logger.warning(f"Notifier: Telegram rate-limited (attempt {attempt}/{_MAX_ATTEMPTS}), retrying in {delay:.1f}s")
+                    await asyncio.sleep(delay)
+                    continue
                 logger.warning(f"Notifier: Telegram HTTP {resp.status}: {body[:200]}")
-    except Exception as e:
-        logger.warning(f"Notifier: Telegram send failed: {type(e).__name__}: {e}")
+                return
+        except Exception as e:
+            if attempt < _MAX_ATTEMPTS:
+                logger.warning(f"Notifier: Telegram send failed (attempt {attempt}/{_MAX_ATTEMPTS}): {type(e).__name__}: {e}, retrying")
+                await asyncio.sleep(_BASE_BACKOFF_SEC * attempt)
+                continue
+            logger.warning(f"Notifier: Telegram send failed permanently after {_MAX_ATTEMPTS} attempts: {type(e).__name__}: {e}")
 
 
 def alert(message: str) -> None:
