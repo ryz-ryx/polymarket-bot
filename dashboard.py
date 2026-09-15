@@ -266,9 +266,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "daily_pnl": 0.0,
                 "circuit_breaker_triggered": False
             }
+            # config.starting_balance_usd is the TOTAL wallet pool shared across every
+            # active asset (see Polymarket5mBot.__init__), not a per-asset allowance --
+            # before an asset's first trade writes its real state file, fall back to its
+            # even split of that pool, not the whole thing (which would overstate a
+            # not-yet-started asset's balance by up to Nx).
             positions_data = read_json_file(pos_file) or {
                 "positions": [],
-                "simulated_balance": config.starting_balance_usd
+                "simulated_balance": config.starting_balance_usd / max(len(assets), 1)
             }
 
             conf_weight = get_asset_confidence_weight(suffix)
