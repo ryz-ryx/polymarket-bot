@@ -76,9 +76,44 @@ class EmpiricalCalibrator:
                     "spot_lead_lag", "twap_dev", "book_depth_skew"
                 ])
         else:
+            self._ensure_header()
             self._migrate_add_shadow_column()
             self._migrate_add_cbi_column()
             self._migrate_add_edge_research_columns()
+
+    def _ensure_header(self):
+        """
+        Defends against a file that exists but is headerless -- can happen if the log
+        path is deleted (e.g. manual cleanup) while this process is still running:
+        __init__'s exists()-gated header write already ran at startup, so the next
+        append-mode log_observation()/resolve_window() call transparently recreates
+        the file with pure data rows, no header, and no error. Every downstream
+        consumer (this class's own DictReader-based methods, and the dashboard) then
+        silently misparses -- worse, the migration methods below mistake the first
+        DATA row for a header and splice literal column-name strings into it, corrupting
+        that row (and shifting every row after it, since they're all rewritten relative
+        to the wrong header). Detect a real header by checking for the literal
+        "timestamp" first field rather than just file existence, and prepend the
+        correct header if it's missing -- cheap, and makes this corruption class
+        structurally impossible going forward.
+        """
+        try:
+            with open(self.log_path, "r", encoding="utf-8") as f:
+                first_line = f.readline()
+            if first_line.startswith("timestamp,"):
+                return
+            with open(self.log_path, "r", encoding="utf-8") as f:
+                rest = f.read()
+            with open(self.log_path, "w", newline="", encoding="utf-8") as f:
+                f.write(
+                    "timestamp,window_id,tau_sec,moneyness,vol_annualized,ofi,cbi,z,"
+                    "p_model,p_model_shadow,p_market,realized_up,spot_lead_lag,twap_dev,"
+                    "book_depth_skew\n"
+                )
+                f.write(rest)
+            logger.warning(f"Calibrator: {self.log_path} was missing its header row -- prepended it (no data rows touched).")
+        except Exception as e:
+            logger.error(f"Calibrator: failed to check/repair header on {self.log_path}: {e}")
 
     def _migrate_add_edge_research_columns(self):
         """

@@ -17,6 +17,8 @@ class ArbitrageScanner:
     so that's answered empirically before any execution logic gets built on top of it.
     """
 
+    HEADER = ["timestamp", "window_id", "yes_ask", "no_ask", "combined", "gross_edge"]
+
     def __init__(self, log_path: str = ARBITRAGE_LOG):
         self.log_path = log_path
         self._checks = 0
@@ -26,7 +28,26 @@ class ArbitrageScanner:
         if not os.path.exists(self.log_path):
             with open(self.log_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["timestamp", "window_id", "yes_ask", "no_ask", "combined", "gross_edge"])
+                writer.writerow(self.HEADER)
+        else:
+            self._ensure_header()
+
+    def _ensure_header(self):
+        # See EmpiricalCalibrator._ensure_header() -- same class of bug: a file
+        # deleted out from under a still-running process gets silently recreated
+        # headerless on the next append.
+        try:
+            with open(self.log_path, "r", encoding="utf-8") as f:
+                first_line = f.readline()
+            if first_line.startswith("timestamp,"):
+                return
+            with open(self.log_path, "r", encoding="utf-8") as f:
+                rest = f.read()
+            with open(self.log_path, "w", newline="", encoding="utf-8") as f:
+                f.write(",".join(self.HEADER) + "\n")
+                f.write(rest)
+        except Exception:
+            pass
 
     def check(self, window_id: int, yes_ask: Optional[float], no_ask: Optional[float]) -> Optional[float]:
         """

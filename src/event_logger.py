@@ -17,17 +17,42 @@ class TradeEventLogger:
       - 'BLOCKED_HURDLE' (real edge < direct book spread hurdle)
       - 'EXECUTED' (order placed on direct resting book)
     """
+    HEADER = [
+        "timestamp", "window_id", "tau_sec", "outcome",
+        "z", "p_model", "direct_ask", "direct_spread",
+        "real_edge", "hurdle", "status", "size_usd"
+    ]
+
     def __init__(self, log_path: str = EVENT_LOG):
         self.log_path = log_path
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
         if not os.path.exists(self.log_path):
             with open(self.log_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    "timestamp", "window_id", "tau_sec", "outcome",
-                    "z", "p_model", "direct_ask", "direct_spread",
-                    "real_edge", "hurdle", "status", "size_usd"
-                ])
+                writer.writerow(self.HEADER)
+        else:
+            self._ensure_header()
+
+    def _ensure_header(self):
+        """
+        See EmpiricalCalibrator._ensure_header() for why this matters: if this log
+        path gets deleted while a process still holds this logger alive, the next
+        append-mode log_event() call silently recreates the file with pure data rows
+        and no header -- every downstream reader (dashboard.py's tail-read parsing)
+        then mistakes the first data row for the header and misparses every field.
+        """
+        try:
+            with open(self.log_path, "r", encoding="utf-8") as f:
+                first_line = f.readline()
+            if first_line.startswith("timestamp,"):
+                return
+            with open(self.log_path, "r", encoding="utf-8") as f:
+                rest = f.read()
+            with open(self.log_path, "w", newline="", encoding="utf-8") as f:
+                f.write(",".join(self.HEADER) + "\n")
+                f.write(rest)
+        except Exception:
+            pass
 
     def log_event(
         self,
