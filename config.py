@@ -40,6 +40,14 @@ class BotConfig(BaseModel):
     max_portfolio_daily_loss_usd: float = float(os.getenv("MAX_PORTFOLIO_DAILY_LOSS_USD", "20.0"))
     slippage_tolerance: float = float(os.getenv("SLIPPAGE_TOLERANCE", "0.02"))
     kelly_fraction: float = float(os.getenv("KELLY_FRACTION", "0.125"))
+    # Staged live rollout: once paper_trading is turned off, each asset's
+    # OrderExecutor auto-halts live order placement after this many real
+    # fills, falling back to paper mode until manually reset (restart the
+    # asset's live_trade_count.json to 0, or bump this). Forces a deliberate
+    # look at real execution/redemption behavior on a handful of small real
+    # trades before scaling up, instead of unlimited live trading the moment
+    # PAPER_TRADING flips.
+    live_test_max_trades: int = int(os.getenv("LIVE_TEST_MAX_TRADES", "5"))
     spot_exchange: str = os.getenv("SPOT_EXCHANGE", "binance").lower()
 
     # Discord / Telegram alerts (both optional -- unset means that channel is silently

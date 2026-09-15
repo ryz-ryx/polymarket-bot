@@ -26,10 +26,13 @@ class OrderExecutor:
         self.open_paper_positions: List[Dict[str, Any]] = []
         self.open_live_positions: List[Dict[str, Any]] = []
         self.live_positions_file = f"data/open_live_positions{asset_suffix}.json"
+        self.live_trade_count_file = f"data/live_trade_count{asset_suffix}.json"
+        self.live_trade_count = 0
         self._default_balance = self.simulated_balance
 
         self._load_positions()
         self._load_live_positions()
+        self._load_live_trade_count()
 
         if not self.paper_trading:
             self._init_live_client()
@@ -58,6 +61,24 @@ class OrderExecutor:
                         )
             except Exception as e:
                 logger.error(f"Failed to load live positions from disk: {e}")
+
+    def _load_live_trade_count(self):
+        if os.path.exists(self.live_trade_count_file):
+            try:
+                with open(self.live_trade_count_file, "r", encoding="utf-8") as f:
+                    self.live_trade_count = int(json.load(f).get("count", 0))
+            except Exception as e:
+                logger.error(f"Failed to load live trade count from disk: {e}")
+
+    def _save_live_trade_count(self):
+        os.makedirs(os.path.dirname(self.live_trade_count_file), exist_ok=True)
+        try:
+            tmp_file = f"{self.live_trade_count_file}.tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump({"count": self.live_trade_count, "updated_at": time.time()}, f, indent=2)
+            os.replace(tmp_file, self.live_trade_count_file)
+        except Exception as e:
+            logger.error(f"Failed to persist live trade count to disk: {e}")
 
     def _save_live_positions(self):
         os.makedirs(os.path.dirname(self.live_positions_file), exist_ok=True)
@@ -225,6 +246,16 @@ class OrderExecutor:
                 )
                 return {"status": "BLOCKED_NO_LIVE_CLIENT"}
 
+            if self.live_trade_count >= config.live_test_max_trades:
+                logger.critical(
+                    f"[LIVE EXEC HALTED] {self.asset} has reached its live test cap "
+                    f"({self.live_trade_count}/{config.live_test_max_trades} real trades) -- "
+                    f"refusing further live orders until manually reset (delete "
+                    f"{self.live_trade_count_file} or raise LIVE_TEST_MAX_TRADES). "
+                    f"Review real fills/redemptions so far before continuing."
+                )
+                return {"status": "BLOCKED_LIVE_TEST_CAP", "live_trade_count": self.live_trade_count}
+
             try:
                 from py_clob_client.clob_types import MarketOrderArgs, OrderType
                 from py_clob_client.order_builder.constants import BUY
@@ -274,6 +305,8 @@ class OrderExecutor:
             # position) is NOT implemented yet -- see settle_window_positions().
             self.open_live_positions.append(position)
             self._save_live_positions()
+            self.live_trade_count += 1
+            self._save_live_trade_count()
 
             self._log_fill({
                 "ts": now_ts,
@@ -321,11 +354,11 @@ class OrderExecutor:
                     logger.warning(f"Redeemer: get_neg_risk check failed for {pos['slug']}, assuming non-neg-risk: {e}")
                     is_neg_risk = False
 
-                result = redeem_position(pos["slug"], is_neg_risk=is_neg_risk)
+                shares = pos["amount_usd"] / max(pos["price"], 0.01)
+                result = redeem_position(pos["slug"], token_id=pos["token_id"], shares=shares, is_neg_risk=is_neg_risk)
 
                 if result["status"] == "REDEEMED":
                     is_win = (pos["outcome"] == "YES" and realized_up == 1) or (pos["outcome"] == "NO" and realized_up == 0)
-                    shares = pos["amount_usd"] / max(pos["price"], 0.01)
                     # ESTIMATED from the recorded entry price/size, not read back from the
                     # chain -- redeemPositions doesn't return the payout amount directly,
                     # and the real number lives in the wallet's actual USDC balance

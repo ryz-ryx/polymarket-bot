@@ -902,12 +902,13 @@ class AssetTradingEngine:
                     # NOTE: self.executor.simulated_balance is correct here for both modes since
                     # it's now seeded from this engine's real share of config.starting_balance_usd
                     # (the actual funded wallet total, split across concurrently-traded assets --
-                    # see Polymarket5mBot.__init__) rather than a fantasy $500 placeholder that
-                    # used to apply whenever paper_trading was False. It still won't reflect real
-                    # fills once live execution actually happens, though: OrderExecutor.execute_trade's
-                    # live branch is a stub (returns SUBMITTED_LIVE without touching simulated_balance
-                    # or querying the on-chain USDC balance) -- real balance tracking for live mode
-                    # is unimplemented and must be built before paper_trading is ever turned off.
+                    # see Polymarket5mBot.__init__). Kelly sizing is still computed off this
+                    # simulated ledger even in live mode, though -- OrderExecutor.execute_trade's
+                    # live branch places/tracks real orders (open_live_positions) but never
+                    # touches simulated_balance, so bankroll here drifts from the real on-chain
+                    # USDC balance as live fills accumulate. Use get_live_collateral_balance()
+                    # for the real number; sizing off the real balance instead of this ledger
+                    # is a further improvement, not yet made.
                     bankroll = self.executor.simulated_balance
                     odds = 1.0 / max(exec_price, 0.05)
                     size = self.risk_manager.calculate_position_size(
