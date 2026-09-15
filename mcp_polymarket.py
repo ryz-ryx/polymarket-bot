@@ -70,7 +70,7 @@ def _tools() -> list[dict[str, Any]]:
         {"name": "polymarket_drawdown", "description": "Check if the drawdown breaker is tripped.", "inputSchema": {"type": "object", "properties": {}}},
         {"name": "polymarket_funnel", "description": "Get funnel stats for an asset (phantom rate, blocked signals).", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol (BTC)"}, "window_hours": {"type": "integer", "default": 4, "description": "Window in hours"}, "baseline_hours": {"type": "integer", "default": 96, "description": "Baseline in hours"}}}},
         {"name": "polymarket_calibration", "description": "Get model calibration stats (Brier scores) for an asset.", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol"}}}},
-        {"name": "polymarket_recent_trades", "description": "Get recent executed trades for an asset.", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol"}, "status": {"type": "string", "default": "EXECUTED", "description": "Trade status filter"}, "limit": {"type": "integer", "default": 20, "description": "Max trades to return"}}}},
+        {"name": "polymarket_recent_trades", "description": "Get recent executed trades for an asset.", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol"}, "status": {"type": "string", "default": "EXECUTED", "description": "Trade status filter"}, "limit": {"type": "integer", "default": 50, "description": "Max trades to return"}}}},
         {"name": "polymarket_logs", "description": "Get recent log lines from the bot.", "inputSchema": {"type": "object", "properties": {"lines": {"type": "integer", "default": 40, "description": "Number of lines (1-200)"}}}},
         {"name": "polymarket_control", "description": "Pause or resume the bot (requires CONTROL_SECRET). Prefer polymarket_pause / polymarket_start for clearer intent.", "inputSchema": {"type": "object", "properties": {"paused": {"type": "boolean", "description": "True to pause, False to resume"}, "updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}, "required": ["paused"]}},
         {"name": "polymarket_pause", "description": "Pause the bot (stops opening new trades; requires CONTROL_SECRET).", "inputSchema": {"type": "object", "properties": {"updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}}},
@@ -87,34 +87,54 @@ def _call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     if name == "polymarket_state":
         return _get("/api/state")
     if name == "polymarket_pnl":
+        # Was hardcoded to BTC only -- with ETH/SOL now trading live alongside
+        # BTC, this silently omitted them from every "what's my PnL" answer,
+        # understating real portfolio state with no way for the caller to
+        # even ask otherwise (no asset param existed). Report every active
+        # asset plus the portfolio total.
         state = _get("/api/state")
         if "error" in state:
             return state
-        btc = state.get("assets", {}).get("BTC", {})
+        per_asset = {}
+        for asset, a in state.get("assets", {}).items():
+            per_asset[asset] = {
+                "balance_usd": a.get("positions", {}).get("simulated_balance"),
+                "daily_pnl_usd": a.get("risk", {}).get("daily_pnl"),
+                "confidence_weight": a.get("confidence_weight"),
+                "circuit_breaker_triggered": a.get("risk", {}).get("circuit_breaker_triggered"),
+                "current_day": a.get("risk", {}).get("current_day"),
+            }
+        portfolio = state.get("portfolio", {})
         return {
-            "balance_usd": btc.get("positions", {}).get("simulated_balance"),
-            "daily_pnl_usd": btc.get("risk", {}).get("daily_pnl"),
-            "confidence_weight": btc.get("confidence_weight"),
-            "circuit_breaker_triggered": btc.get("risk", {}).get("circuit_breaker_triggered"),
-            "current_day": btc.get("risk", {}).get("current_day"),
+            "assets": per_asset,
+            "portfolio_daily_pnl_usd": portfolio.get("daily_pnl"),
+            "portfolio_circuit_breaker_triggered": portfolio.get("circuit_breaker_triggered"),
         }
     if name == "polymarket_summary":
+        # Same BTC-only bug as polymarket_pnl above -- fixed the same way.
         state = _get("/api/state")
-        calib = _get("/api/calibration", {"asset": "BTC"})
         drawdown = _get("/api/drawdown")
         if "error" in state:
             return state
-        btc = state.get("assets", {}).get("BTC", {})
+        per_asset = {}
+        for asset, a in state.get("assets", {}).items():
+            calib = _get("/api/calibration", {"asset": asset})
+            per_asset[asset] = {
+                "balance_usd": a.get("positions", {}).get("simulated_balance"),
+                "daily_pnl_usd": a.get("risk", {}).get("daily_pnl"),
+                "confidence_weight": a.get("confidence_weight"),
+                "daily_circuit_breaker_triggered": a.get("risk", {}).get("circuit_breaker_triggered"),
+                "calibration_maturity": calib.get("maturity") if "error" not in calib else None,
+                "model_brier": calib.get("model_brier") if "error" not in calib else None,
+                "market_brier": calib.get("market_brier") if "error" not in calib else None,
+                "model_better_than_market": calib.get("model_better_than_market") if "error" not in calib else None,
+            }
+        portfolio = state.get("portfolio", {})
         return {
-            "balance_usd": btc.get("positions", {}).get("simulated_balance"),
-            "daily_pnl_usd": btc.get("risk", {}).get("daily_pnl"),
-            "confidence_weight": btc.get("confidence_weight"),
-            "daily_circuit_breaker_triggered": btc.get("risk", {}).get("circuit_breaker_triggered"),
+            "assets": per_asset,
+            "portfolio_daily_pnl_usd": portfolio.get("daily_pnl"),
+            "portfolio_circuit_breaker_triggered": portfolio.get("circuit_breaker_triggered"),
             "drawdown_breaker_tripped": drawdown.get("tripped") if "error" not in drawdown else None,
-            "calibration_maturity": calib.get("maturity") if "error" not in calib else None,
-            "model_brier": calib.get("model_brier") if "error" not in calib else None,
-            "market_brier": calib.get("market_brier") if "error" not in calib else None,
-            "model_better_than_market": calib.get("model_better_than_market") if "error" not in calib else None,
             "recent_fills": state.get("fills", [])[:5],
         }
     if name == "polymarket_drawdown":
@@ -124,7 +144,7 @@ def _call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     if name == "polymarket_calibration":
         return _get("/api/calibration", {"asset": args.get("asset", "BTC")})
     if name == "polymarket_recent_trades":
-        return _get("/api/recent_trades", {"asset": args.get("asset", "BTC"), "status": args.get("status", "EXECUTED"), "limit": str(args.get("limit", 20))})
+        return _get("/api/recent_trades", {"asset": args.get("asset", "BTC"), "status": args.get("status", "EXECUTED"), "limit": str(args.get("limit", 50))})
     if name == "polymarket_logs":
         return _get("/api/logs", {"lines": str(args.get("lines", 40))})
     if name == "polymarket_control":
@@ -190,7 +210,7 @@ def main() -> None:
         return _call_tool("polymarket_calibration", {"asset": asset})
 
     @server.tool()
-    def polymarket_recent_trades(asset: str = "BTC", status: str = "EXECUTED", limit: int = 20) -> dict[str, Any]:
+    def polymarket_recent_trades(asset: str = "BTC", status: str = "EXECUTED", limit: int = 50) -> dict[str, Any]:
         """Get recent trades."""
         return _call_tool("polymarket_recent_trades", {"asset": asset, "status": status, "limit": limit})
 
