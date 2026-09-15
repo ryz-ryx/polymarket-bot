@@ -918,10 +918,41 @@ class AssetTradingEngine:
                         confidence_weight=confidence_weight
                     )
 
-                    if size > 0:
+                    if 0 < size < config.min_order_usd:
+                        # Real CLOB market orders below this size are rejected outright --
+                        # paper trading had no floor and would silently "fill" a sub-minimum
+                        # order that could never happen for real.
+                        self.event_logger.log_event(
+                            window_id=self.current_window_id,
+                            tau_sec=time_remaining_sec,
+                            outcome=signal["outcome"],
+                            z=z,
+                            p_model=signal["estimated_prob"],
+                            direct_ask=exec_price,
+                            direct_spread=direct_spread,
+                            real_edge=real_edge,
+                            hurdle=direct_hurdle,
+                            status="BLOCKED_MIN_ORDER_SIZE",
+                            size_usd=0.0
+                        )
+                    elif size > 0:
                         # Proposal 3: Order-Book Depth & Realistic Book Walking
                         # Walk the direct ask order book to obtain the true VWAP fill price across depth
                         target_asks = live_quotes.get("yes_asks" if is_yes else "no_asks", [])
+
+                        if self.executor.paper_trading and config.sim_exec_latency_ms > 0:
+                            # A real order isn't filled against the book the signal was
+                            # decided on -- it's filled against whatever the book looks
+                            # like after a real network round-trip to the CLOB. Simulate
+                            # that gap here and re-fetch the freshest book before pricing
+                            # the fill, so paper slippage reflects real adverse selection
+                            # instead of an impossible instant fill.
+                            await asyncio.sleep(config.sim_exec_latency_ms / 1000.0)
+                            target_token = self.market_feed.token_id_yes if is_yes else self.market_feed.token_id_no
+                            fresh_asks = await self.market_feed.fetch_fresh_asks(target_token)
+                            if fresh_asks:
+                                target_asks = fresh_asks
+
                         vwap_price, total_cost, total_shares = self.market_feed.simulate_walk_book(target_asks, size)
 
                         if vwap_price is None:

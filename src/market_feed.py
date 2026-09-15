@@ -183,9 +183,9 @@ class PolymarketFeed:
         vwap = total_cost / total_shares if total_shares > 0 else None
         return vwap, total_cost, total_shares
 
-    async def _fetch_single_book(self, token_id: str) -> Tuple[Optional[float], Optional[float], List[Dict[str, float]], List[Dict[str, float]]]:
+    async def _fetch_single_book(self, token_id: str, max_ws_age_s: float = 20.0) -> Tuple[Optional[float], Optional[float], List[Dict[str, float]], List[Dict[str, float]]]:
         if self.book_ws is not None:
-            ws_book = self.book_ws.get_book(token_id, max_age_s=20.0)
+            ws_book = self.book_ws.get_book(token_id, max_age_s=max_ws_age_s)
             if ws_book is not None:
                 return ws_book["best_bid"], ws_book["best_ask"], ws_book["bids"], ws_book["asks"]
         if time.time() < self._book_backoff_until:
@@ -228,6 +228,18 @@ class PolymarketFeed:
             # fails. Needs to be loud until we know why.
             logger.warning(f"_fetch_single_book: {type(e).__name__} for token {token_id}: {e}")
         return None, None, [], []
+
+    async def fetch_fresh_asks(self, token_id: str) -> List[Dict[str, float]]:
+        """
+        Fetch the freshest possible ask ladder for one token (max 1s WS cache
+        age, falling back to a live REST call) -- used to re-price a fill
+        AFTER simulating execution latency, rather than reusing the book
+        snapshot the trading signal was decided on.
+        """
+        if not token_id:
+            return []
+        _, _, _, asks = await self._fetch_single_book(token_id, max_ws_age_s=1.0)
+        return asks
 
     async def get_live_market_prices(self) -> Dict[str, Any]:
         prices = {

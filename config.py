@@ -48,6 +48,20 @@ class BotConfig(BaseModel):
     # trades before scaling up, instead of unlimited live trading the moment
     # PAPER_TRADING flips.
     live_test_max_trades: int = int(os.getenv("LIVE_TEST_MAX_TRADES", "5"))
+    # Paper-trading realism: a real order incurs a real network round-trip
+    # (sign + POST to CLOB + match) before it fills, during which the book can
+    # move. Paper trading used to fill instantly against the same book snapshot
+    # the signal was decided on -- this simulates that round-trip delay, then
+    # re-fetches the book fresh before computing the paper fill, so paper PnL
+    # reflects the same adverse-selection risk a real order would face. 300ms
+    # is a conservative estimate for a signed CLOB order round-trip; there's no
+    # live order history yet to measure the real figure against.
+    sim_exec_latency_ms: int = int(os.getenv("SIM_EXEC_LATENCY_MS", "300"))
+    # Polymarket's CLOB rejects market orders below this size -- paper trading
+    # had no floor, so Kelly sizing could "fill" a $0.30 paper order that a
+    # real order would never be accepted for. $1.00 is Polymarket's documented
+    # CLOB minimum order size.
+    min_order_usd: float = float(os.getenv("MIN_ORDER_USD", "1.0"))
     spot_exchange: str = os.getenv("SPOT_EXCHANGE", "binance").lower()
 
     # Discord / Telegram alerts (both optional -- unset means that channel is silently
