@@ -172,6 +172,29 @@ class OrderExecutor:
             logger.error(f"OrderExecutor [{self.asset}]: Failed to fetch live collateral balance: {e}")
             return None
 
+    def reconcile_live_balance(self, tolerance_usd: float = 1.0) -> None:
+        """
+        Compares the tracked simulated_balance (used for Kelly sizing) against the
+        real on-chain USDC balance and just logs a loud warning on divergence --
+        does NOT auto-correct, since a real discrepancy (a failed/stuck redemption,
+        an unexpected fee, manual wallet activity) is exactly the kind of thing that
+        should stop and get a human looking at it rather than being silently papered
+        over. Call periodically in live mode, e.g. once per settled window.
+        """
+        if self.paper_trading or self.clob_client is None:
+            return
+        real_balance = self.get_live_collateral_balance()
+        if real_balance is None:
+            return
+        drift = self.simulated_balance - real_balance
+        if abs(drift) > tolerance_usd:
+            logger.critical(
+                f"[LIVE BALANCE DRIFT] {self.asset}: tracked simulated_balance=${self.simulated_balance:.2f} "
+                f"vs real on-chain USDC=${real_balance:.2f} (drift ${drift:+.2f}, tolerance ${tolerance_usd:.2f}). "
+                f"Kelly sizing is reading the tracked figure -- investigate before trusting further live sizing "
+                f"(check for stuck/failed redemptions in open_live_positions, unexpected fees, or manual wallet activity)."
+            )
+
     async def execute_trade(
         self,
         window_id: int,
@@ -299,10 +322,14 @@ class OrderExecutor:
                 "timestamp": now_ts
             }
             # Kept separate from open_paper_positions -- these track real money and
-            # must never be settled/corrected by the paper-settlement math in
-            # settle_window_positions(), which is a simulated-ledger credit, not a
-            # real redemption. Real settlement (claiming payout for a resolved
-            # position) is NOT implemented yet -- see settle_window_positions().
+            # are settled via real on-chain redemption (see settle_window_positions()'s
+            # live branch / src/redeemer.py), not paper-settlement math. simulated_balance
+            # is still debited/credited alongside this, though -- it's the bankroll figure
+            # Kelly sizing reads (see bot.py's `bankroll = self.executor.simulated_balance`),
+            # and leaving it frozen at the initial split while real capital moves would size
+            # every subsequent live bet off a stale number.
+            self.simulated_balance -= amount_usd
+            self._save_positions()
             self.open_live_positions.append(position)
             self._save_live_positions()
             self.live_trade_count += 1
@@ -366,6 +393,12 @@ class OrderExecutor:
                     # this is just bookkeeping so daily_pnl isn't left silently blank).
                     net_pnl = (shares if is_win else 0.0) - pos["amount_usd"]
                     total_estimated_pnl += net_pnl
+                    # Credit the estimated payout back (cost was already debited on entry
+                    # in execute_trade) so simulated_balance keeps tracking real capital for
+                    # the next Kelly sizing call -- see the matching debit's comment above.
+                    if is_win:
+                        self.simulated_balance += shares
+                    self._save_positions()
                     self._log_fill({
                         "ts": time.time(), "asset": self.asset, "type": "LIVE_REDEEMED",
                         "window_id": window_id, "slug": pos["slug"], "outcome": pos["outcome"],
@@ -388,6 +421,7 @@ class OrderExecutor:
                 p for p in self.open_live_positions if p["window_id"] != window_id
             ] + still_open
             self._save_live_positions()
+            self.reconcile_live_balance()
             return total_estimated_pnl
 
         settling = [p for p in self.open_paper_positions if p["window_id"] == window_id]

@@ -147,6 +147,28 @@ def redeem_position(slug: str, token_id: str = "", shares: float = 0.0, is_neg_r
             return {"status": "FAILED", "reason": f"Could not connect to Polygon RPC at {config.polygon_rpc_url}."}
 
         account = Account.from_key(config.poly_private_key)
+
+        # Redemption is an on-chain tx and costs real gas (paid in POL/MATIC, not
+        # USDC) -- unlike order placement, which is off-chain/gasless via the CLOB.
+        # A wallet funded with USDC but zero POL would have every redemption fail
+        # here, silently leaving winning positions stuck unredeemed indefinitely
+        # (a real, easy-to-miss way for "profitable" trades to never become real
+        # profit). Check and refuse with a clear reason instead of burning the
+        # 120s receipt-wait timeout on a tx that can never be mined.
+        native_balance_wei = w3.eth.get_balance(account.address)
+        native_balance = native_balance_wei / 1e18
+        MIN_GAS_BALANCE_POL = 0.05
+        if native_balance < MIN_GAS_BALANCE_POL:
+            return {
+                "status": "REFUSED",
+                "reason": (
+                    f"Wallet {account.address} has only {native_balance:.5f} POL -- "
+                    f"below the {MIN_GAS_BALANCE_POL} POL minimum assumed needed for "
+                    f"redemption gas. Fund the wallet with POL (not USDC) or redemption "
+                    f"will keep failing and winning positions will stay stuck unredeemed."
+                ),
+            }
+
         condition_id_bytes = bytes.fromhex(condition_id[2:] if condition_id.startswith("0x") else condition_id)
 
         if is_neg_risk:
