@@ -15,6 +15,12 @@ class BotConfig(BaseModel):
     chain_id: int = int(os.getenv("CHAIN_ID", "137"))
     clob_api_host: str = os.getenv("CLOB_API_HOST", "https://clob.polymarket.com")
     clob_ws_host: str = os.getenv("CLOB_WS_HOST", "wss://ws-subscriptions-clob.polymarket.com/ws/market")
+    # Public Polygon RPC by default -- fine for occasional redeemPositions calls
+    # (low volume, not latency-sensitive like order placement). polygon-rpc.com
+    # and llamarpc both failed to connect/resolve when actually tested from this
+    # environment; 1rpc.io/matic verified working (chain_id 137 confirmed).
+    # Override with a dedicated RPC (Alchemy/Infura/etc.) if this one degrades.
+    polygon_rpc_url: str = os.getenv("POLYGON_RPC_URL", "https://1rpc.io/matic")
     
     target_asset: str = "BTC"
     # Comma-separated list of assets to trade concurrently, e.g. "BTC,ETH,SOL".

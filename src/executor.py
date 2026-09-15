@@ -306,20 +306,56 @@ class OrderExecutor:
         source: str = "POLYMARKET"
     ) -> float:
         if not self.paper_trading:
-            # NOT a no-op by accident -- real settlement (claiming/redeeming a resolved
-            # position for actual USDC) is genuinely unimplemented. Polymarket requires
-            # an on-chain redeemPositions call against the CTF/NegRiskAdapter contract,
-            # which is a raw web3 transaction, not a CLOB REST endpoint -- unbuilt.
-            # Surface that loudly instead of silently pretending settlement happened.
             live_here = [p for p in self.open_live_positions if p["window_id"] == window_id]
-            if live_here:
-                logger.critical(
-                    f"[LIVE SETTLEMENT UNIMPLEMENTED] {self.asset} window {window_id} resolved "
-                    f"({'UP' if realized_up == 1 else 'DOWN'}) with {len(live_here)} open real-money "
-                    f"position(s) still tracked -- these are NOT auto-redeemed. Check/claim them "
-                    f"manually on polymarket.com until on-chain redemption is built."
-                )
-            return 0.0
+            if not live_here:
+                return 0.0
+
+            from src.redeemer import redeem_position
+
+            total_estimated_pnl = 0.0
+            still_open = []
+            for pos in live_here:
+                try:
+                    is_neg_risk = bool(self.clob_client.get_neg_risk(pos["token_id"])) if self.clob_client else False
+                except Exception as e:
+                    logger.warning(f"Redeemer: get_neg_risk check failed for {pos['slug']}, assuming non-neg-risk: {e}")
+                    is_neg_risk = False
+
+                result = redeem_position(pos["slug"], is_neg_risk=is_neg_risk)
+
+                if result["status"] == "REDEEMED":
+                    is_win = (pos["outcome"] == "YES" and realized_up == 1) or (pos["outcome"] == "NO" and realized_up == 0)
+                    shares = pos["amount_usd"] / max(pos["price"], 0.01)
+                    # ESTIMATED from the recorded entry price/size, not read back from the
+                    # chain -- redeemPositions doesn't return the payout amount directly,
+                    # and the real number lives in the wallet's actual USDC balance
+                    # (get_live_collateral_balance() is the source of truth for that,
+                    # this is just bookkeeping so daily_pnl isn't left silently blank).
+                    net_pnl = (shares if is_win else 0.0) - pos["amount_usd"]
+                    total_estimated_pnl += net_pnl
+                    self._log_fill({
+                        "ts": time.time(), "asset": self.asset, "type": "LIVE_REDEEMED",
+                        "window_id": window_id, "slug": pos["slug"], "outcome": pos["outcome"],
+                        "won": is_win, "estimated_net_pnl": net_pnl, "tx_hash": result.get("tx_hash"),
+                    })
+                    logger.warning(
+                        f"[LIVE REDEEMED] {self.asset} window {window_id} {pos['outcome']} "
+                        f"{'WIN' if is_win else 'LOSS'} | tx={result.get('tx_hash')} | "
+                        f"estimated PnL ${net_pnl:+.2f} (verify against real wallet balance)"
+                    )
+                else:
+                    still_open.append(pos)
+                    logger.critical(
+                        f"[LIVE REDEMPTION FAILED] {self.asset} window {window_id} {pos['slug']}: "
+                        f"{result.get('reason')} -- position remains tracked as open, NOT redeemed. "
+                        f"Check/claim manually on polymarket.com if this doesn't resolve on retry."
+                    )
+
+            self.open_live_positions = [
+                p for p in self.open_live_positions if p["window_id"] != window_id
+            ] + still_open
+            self._save_live_positions()
+            return total_estimated_pnl
 
         settling = [p for p in self.open_paper_positions if p["window_id"] == window_id]
         if not settling:
