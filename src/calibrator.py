@@ -1,4 +1,4 @@
-# build-cache-bust: 2026-09-13T13:30Z confidence-gate calibration fix
+# build-cache-bust: 2026-09-15T09:35Z headerless-CSV-corruption fix (Railway watch-diff skipping again)
 import os
 import csv
 import pickle
