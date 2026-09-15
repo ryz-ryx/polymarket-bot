@@ -1,4 +1,4 @@
-# build-cache-bust: 2026-09-15T11:03Z dashboard per-asset balance split fix (Railway watch-diff skipping again)
+# build-cache-bust: 2026-09-15T18:40Z neg-risk redemption + live balance sync + paper realism fixes (Railway watch-diff skipping again, 3 deploys in a row didn't land)
 import os
 import csv
 import pickle
