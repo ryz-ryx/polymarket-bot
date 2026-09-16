@@ -3,7 +3,8 @@ Forces a genuine Railway rebuild when the watch-path diff is stuck reporting
 also hit and worked around in 51e6739, 0874e36, 00e2955). Safe to delete
 once a deploy actually lands after touching this file.
 
-Last bump: 2026-09-15T18:55Z -- neg-risk redemption, live balance sync,
-gas-guard, and paper-realism (latency/min-order) fixes still not deployed
-after 3 attempts including a calibrator.py marker bump (all SKIPPED,
-"No changes to watched files").
+Last bump: 2026-09-16T07:10Z -- testing whether reconnecting the GitHub
+source (railway service source connect) resets the stuck watch-diff
+baseline. All 5 prior deploy attempts on 2026-09-15 were SKIPPED despite
+genuinely different commits; workaround was direct file upload + restart,
+which is not durable against a future real rebuild.
