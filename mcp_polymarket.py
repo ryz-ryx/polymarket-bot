@@ -79,6 +79,7 @@ def _tools() -> list[dict[str, Any]]:
         {"name": "polymarket_risk_config", "description": "Get the bot's current risk settings (max position size, max daily loss, Kelly fraction, drawdown limits, paper vs live trading).", "inputSchema": {"type": "object", "properties": {}}},
         {"name": "polymarket_reset_daily_breaker", "description": "Clear a tripped daily-loss circuit breaker (requires CONTROL_SECRET). Only clears the breaker flag, never the underlying daily PnL -- if the day's loss is still past the configured floor, it re-trips on the very next trade check, so this can never mask a genuinely bad day. Use only when asked to un-stick a breaker the user believes tripped in error.", "inputSchema": {"type": "object", "properties": {"updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}}},
         {"name": "polymarket_usage", "description": "List every available command/tool this server exposes, with a one-line description of each. Use this for 'what can you do' / 'usage' / 'help' requests.", "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "polymarket_edge_validation", "description": "The ground-truth 'is this bot actually profitable' check: lifetime win rate and net PnL AFTER real fees, per asset and portfolio-wide, plus a verdict (NO_DATA / INSUFFICIENT_SAMPLE / PROFITABLE_SO_FAR / LOSING_SO_FAR) based on whether there's even enough settled trades to trust the number yet. Trust this over any backtest claim. Use for 'is it working', 'is it profitable', 'should we fund it' questions.", "inputSchema": {"type": "object", "properties": {"min_sample": {"type": "integer", "default": 50, "description": "Minimum settled trades before a win rate is treated as meaningful rather than noise"}}}},
     ]
 
 
@@ -169,6 +170,8 @@ def _call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
         return _post("/api/reset_daily_breaker", {"updated_by": args.get("updated_by", "hermes")}, hdrs={"X-Control-Secret": CONTROL_SECRET})
     if name == "polymarket_usage":
         return {"commands": [{"name": t["name"], "description": t["description"]} for t in _tools()]}
+    if name == "polymarket_edge_validation":
+        return _get("/api/edge_validation", {"min_sample": str(args.get("min_sample", 50))})
     return {"error": f"Unknown tool: {name}"}
 
 
@@ -253,6 +256,11 @@ def main() -> None:
     def polymarket_usage() -> dict[str, Any]:
         """List every available command this server exposes, with a description of each."""
         return _call_tool("polymarket_usage", {})
+
+    @server.tool()
+    def polymarket_edge_validation(min_sample: int = 50) -> dict[str, Any]:
+        """Ground-truth lifetime win rate and fee-adjusted net PnL per asset, with a PROFITABLE_SO_FAR/LOSING_SO_FAR/INSUFFICIENT_SAMPLE verdict. Trust this over any backtest claim."""
+        return _call_tool("polymarket_edge_validation", {"min_sample": min_sample})
 
     log.info("polymarket MCP server starting — tools: %s", [t["name"] for t in _tools()])
 

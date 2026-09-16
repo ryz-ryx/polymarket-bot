@@ -215,6 +215,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.serve_api_version()
             elif path == "/api/risk_config":
                 self.serve_api_risk_config()
+            elif path == "/api/edge_validation":
+                self.serve_api_edge_validation(parse_qs(parsed.query))
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -379,6 +381,78 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "requested_limit": limit,
             "fully_scanned_available_history": fully_scanned,
             "trades": trades,
+        })
+
+    def serve_api_edge_validation(self, query):
+        """
+        The honest "is this actually working" endpoint -- ground-truth lifetime
+        win rate and net PnL AFTER real fees, per asset, from fills_log (already
+        fee-adjusted by OrderExecutor at trade time). Exists because the backtest's
+        82% OOS win rate did not hold up in live paper trading (live sample showed
+        ~40-55% per asset) -- rather than eyeball that gap by hand each time, this
+        computes it directly and flags whether the sample is even large enough to
+        trust yet, so a funding decision never rests on an unproven or tiny sample.
+
+        min_sample (default 50) is a floor, not a statistically rigorous bound --
+        chosen because it's roughly where a coin-flip win rate's 95% CI narrows to
+        about +-14 points, tight enough to separate "unlucky" from "no edge."
+        """
+        min_sample = max(1, int(_safe_float(query.get("min_sample", ["50"])[0], 50)))
+        assets = list(ASSET_SUFFIX.keys())
+        result = {}
+        portfolio_wins = portfolio_losses = 0
+        portfolio_net_pnl = 0.0
+
+        for asset in assets:
+            suffix = ASSET_SUFFIX[asset]
+            fills = read_jsonl_fills(suffix)
+            wins = sum(1 for f in fills if f.get("type") == "WIN")
+            losses = sum(1 for f in fills if f.get("type") == "LOSS")
+            settled = wins + losses
+            # net_pnl on WIN/LOSS fills is already post-fee (fee is subtracted at
+            # entry, baked into cost/payout at settlement) -- see OrderExecutor.
+            net_pnl = sum(_safe_float(f.get("net_pnl")) for f in fills if f.get("type") in ("WIN", "LOSS"))
+            win_rate = (wins / settled) if settled > 0 else None
+            sample_sufficient = settled >= min_sample
+
+            if settled == 0:
+                verdict = "NO_DATA"
+            elif not sample_sufficient:
+                verdict = "INSUFFICIENT_SAMPLE"
+            elif net_pnl > 0:
+                verdict = "PROFITABLE_SO_FAR"
+            else:
+                verdict = "LOSING_SO_FAR"
+
+            portfolio_wins += wins
+            portfolio_losses += losses
+            portfolio_net_pnl += net_pnl
+
+            result[asset] = {
+                "settled_trades": settled,
+                "wins": wins,
+                "losses": losses,
+                "win_rate_pct": round(100.0 * win_rate, 1) if win_rate is not None else None,
+                "net_pnl_usd": round(net_pnl, 2),
+                "sample_sufficient": sample_sufficient,
+                "min_sample_required": min_sample,
+                "verdict": verdict,
+            }
+
+        portfolio_settled = portfolio_wins + portfolio_losses
+        self._send_json({
+            "assets": result,
+            "portfolio": {
+                "settled_trades": portfolio_settled,
+                "win_rate_pct": round(100.0 * portfolio_wins / portfolio_settled, 1) if portfolio_settled > 0 else None,
+                "net_pnl_usd": round(portfolio_net_pnl, 2),
+            },
+            "note": (
+                "win_rate_pct and net_pnl_usd are LIFETIME (all fills_log history, not "
+                "just today) and net_pnl_usd is already fee-adjusted. This is the number "
+                "to trust over any backtest claim -- see individual verdicts before making "
+                "a funding decision."
+            ),
         })
 
     def serve_api_funnel(self, query):
