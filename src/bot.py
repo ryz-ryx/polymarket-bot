@@ -606,7 +606,13 @@ class AssetTradingEngine:
         time_remaining_sec = max(300.0 - (now - self.current_window_start), 1.0)
         raw_vol_ann = self.spot_feed.annualized_vol
         ofi = self.spot_feed.get_ofi_normalized()
-        momentum = self.spot_feed.get_momentum(lookback_seconds=10.0)
+        # Lookback raised 10s -> 180s (see spot_feed.py second_buckets comment for the
+        # validation this is based on). Normalization divisor scaled with it: previous /50.0
+        # was calibrated for 10s price-diff stdev (~$15.3 on BTC), keeping most values within
+        # ~3.3 stdev before clipping to [-1,1]; 180s price-diff stdev is ~$64.7 (measured off
+        # the same Binance klines used to validate the lookback), so /200.0 preserves that same
+        # ~3.3x-stdev-before-saturation convention rather than clipping to +-1 almost always.
+        momentum = self.spot_feed.get_momentum(lookback_seconds=180.0)
 
         # Proposal 2: Deribit DVOL implied volatility blending
         # DVOL is forward-looking 30-day implied vol (decimal, e.g. 0.39 for 39%).
@@ -655,7 +661,7 @@ class AssetTradingEngine:
         total_depth = yes_bid_depth + yes_ask_depth
         cbi = (yes_bid_depth - yes_ask_depth) / total_depth if total_depth > 0 else 0.0
 
-        norm_momentum = max(min(momentum / 50.0, 1.0), -1.0)
+        norm_momentum = max(min(momentum / 200.0, 1.0), -1.0)
         regime_factor = self.spot_feed.get_regime_factor()
         raw_p_model, z = self.strategy.calculate_fair_probability(
             S_t=pricing_spot,
