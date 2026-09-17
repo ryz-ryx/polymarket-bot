@@ -201,6 +201,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.serve_api_drawdown()
             elif path == "/api/recent_trades":
                 self.serve_api_recent_trades(parse_qs(parsed.query))
+            elif path == "/api/fills":
+                self.serve_api_fills(parse_qs(parsed.query))
             elif path == "/api/funnel":
                 self.serve_api_funnel(parse_qs(parsed.query))
             elif path == "/api/calibration":
@@ -341,13 +343,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "updated_at": data.get("updated_at"),
         })
 
-    def serve_api_recent_trades(self, query):
-        asset = (query.get("asset", ["BTC"])[0] or "BTC").upper()
-        if asset not in ASSET_SUFFIX:
-            self._send_json({"error": f"unknown asset '{asset}', expected one of {sorted(ASSET_SUFFIX.keys())}"}, status=400)
-            return
-        status_filter = query.get("status", ["EXECUTED"])[0]
-        limit = min(max(int(_safe_float(query.get("limit", ["20"])[0], 20)), 1), 200)
+    def _recent_trades_for_asset(self, asset, status_filter, limit):
         fp = os.path.join(BASE_DIR, "data", f"trade_events{ASSET_SUFFIX[asset]}.csv")
 
         # Grow the tail read until `limit` matching rows are found or the
@@ -367,20 +363,101 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         recent = matched[-limit:]
         trades = [{
+            "asset": asset,
             "timestamp": _safe_float(r.get("timestamp")),
+            "window_id": r.get("window_id"),
             "outcome": r.get("outcome"),
             "entry_price": _safe_float(r.get("direct_ask")),
             "size_usd": _safe_float(r.get("size_usd")),
             "status": r.get("status"),
+            # Reasoning fields -- why the bot took (or didn't take) this trade. Omitted
+            # previously, which meant no caller (Hermes included) could ever see the
+            # actual signal behind a trade without pulling the raw CSV directly.
+            "z": _safe_float(r.get("z")),
+            "p_model": _safe_float(r.get("p_model")),
+            "real_edge": _safe_float(r.get("real_edge")),
+            "hurdle": _safe_float(r.get("hurdle")),
         } for r in recent]
+        return trades, fully_scanned
+
+    def serve_api_recent_trades(self, query):
+        # "ALL" (or an omitted/blank asset) covers every traded asset in one call --
+        # previously this defaulted to BTC only, silently hiding ETH/SOL from any
+        # caller (Hermes included) that didn't know to pass asset= explicitly three
+        # separate times.
+        asset_param = (query.get("asset", ["ALL"])[0] or "ALL").upper()
+        status_filter = query.get("status", ["EXECUTED"])[0]
+        limit = min(max(int(_safe_float(query.get("limit", ["20"])[0], 20)), 1), 500)
+
+        if asset_param == "ALL":
+            assets = sorted(ASSET_SUFFIX.keys())
+        elif asset_param in ASSET_SUFFIX:
+            assets = [asset_param]
+        else:
+            self._send_json({"error": f"unknown asset '{asset_param}', expected 'ALL' or one of {sorted(ASSET_SUFFIX.keys())}"}, status=400)
+            return
+
+        all_trades = []
+        fully_scanned = {}
+        for asset in assets:
+            trades, scanned = self._recent_trades_for_asset(asset, status_filter, limit)
+            all_trades.extend(trades)
+            fully_scanned[asset] = scanned
+
+        all_trades.sort(key=lambda t: t["timestamp"], reverse=True)
+        if asset_param == "ALL":
+            all_trades = all_trades[:limit]
 
         self._send_json({
-            "asset": asset,
+            "asset": asset_param,
             "status_filter": status_filter,
-            "count": len(trades),
+            "count": len(all_trades),
             "requested_limit": limit,
             "fully_scanned_available_history": fully_scanned,
-            "trades": trades,
+            "trades": all_trades,
+        })
+
+    def serve_api_fills(self, query):
+        """
+        Full settlement history (WIN/LOSS/BUY fills, with net_pnl) across one or all
+        assets, with real pagination -- unlike polymarket_summary's recent_fills,
+        which was hard-capped at 5 entries system-wide regardless of what was asked
+        for. This is the only place win/loss + net_pnl per trade is exposed via the
+        HTTP API at all; previously it required pulling fills_log*.jsonl directly.
+        """
+        asset_param = (query.get("asset", ["ALL"])[0] or "ALL").upper()
+        type_filter = (query.get("type", [""])[0] or "").upper()
+        limit = min(max(int(_safe_float(query.get("limit", ["50"])[0], 50)), 1), 1000)
+
+        if asset_param == "ALL":
+            assets = sorted(ASSET_SUFFIX.keys())
+        elif asset_param in ASSET_SUFFIX:
+            assets = [asset_param]
+        else:
+            self._send_json({"error": f"unknown asset '{asset_param}', expected 'ALL' or one of {sorted(ASSET_SUFFIX.keys())}"}, status=400)
+            return
+
+        all_fills = []
+        for asset in assets:
+            for f in read_jsonl_fills(ASSET_SUFFIX[asset]):
+                f = dict(f)
+                f["asset"] = asset
+                all_fills.append(f)
+
+        if type_filter:
+            all_fills = [f for f in all_fills if str(f.get("type", "")).upper() == type_filter]
+
+        all_fills.sort(key=lambda f: f.get("ts", 0), reverse=True)
+        total_available = len(all_fills)
+        all_fills = all_fills[:limit]
+
+        self._send_json({
+            "asset": asset_param,
+            "type_filter": type_filter or None,
+            "count": len(all_fills),
+            "total_available": total_available,
+            "requested_limit": limit,
+            "fills": all_fills,
         })
 
     def serve_api_edge_validation(self, query):

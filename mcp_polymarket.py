@@ -70,7 +70,8 @@ def _tools() -> list[dict[str, Any]]:
         {"name": "polymarket_drawdown", "description": "Check if the drawdown breaker is tripped.", "inputSchema": {"type": "object", "properties": {}}},
         {"name": "polymarket_funnel", "description": "Get funnel stats for an asset (phantom rate, blocked signals).", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol (BTC)"}, "window_hours": {"type": "integer", "default": 4, "description": "Window in hours"}, "baseline_hours": {"type": "integer", "default": 96, "description": "Baseline in hours"}}}},
         {"name": "polymarket_calibration", "description": "Get model calibration stats (Brier scores) for an asset.", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol"}}}},
-        {"name": "polymarket_recent_trades", "description": "Get recent executed trades for an asset.", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "BTC", "description": "Asset symbol"}, "status": {"type": "string", "default": "EXECUTED", "description": "Trade status filter"}, "limit": {"type": "integer", "default": 50, "description": "Max trades to return"}}}},
+        {"name": "polymarket_recent_trades", "description": "Get recent executed trades, including the reasoning behind each one (z-score, model probability, real edge, hurdle). Defaults to ALL assets combined, not just BTC.", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "ALL", "description": "Asset symbol (BTC/ETH/SOL) or ALL for every traded asset combined"}, "status": {"type": "string", "default": "EXECUTED", "description": "Trade status filter"}, "limit": {"type": "integer", "default": 50, "description": "Max trades to return (up to 500)"}}}},
+        {"name": "polymarket_fills", "description": "Full settlement history (BUY/WIN/LOSS fills with net_pnl) across one or all assets, with real pagination -- unlike polymarket_summary's recent_fills which is capped at 5. Use this for 'show me all the trades' / 'how did each trade settle' / building a full win-loss record.", "inputSchema": {"type": "object", "properties": {"asset": {"type": "string", "default": "ALL", "description": "Asset symbol (BTC/ETH/SOL) or ALL for every traded asset combined"}, "type": {"type": "string", "default": "", "description": "Filter by fill type: BUY, WIN, or LOSS (blank = all types)"}, "limit": {"type": "integer", "default": 100, "description": "Max fills to return (up to 1000)"}}}},
         {"name": "polymarket_logs", "description": "Get recent log lines from the bot.", "inputSchema": {"type": "object", "properties": {"lines": {"type": "integer", "default": 40, "description": "Number of lines (1-200)"}}}},
         {"name": "polymarket_control", "description": "Pause or resume the bot (requires CONTROL_SECRET). Prefer polymarket_pause / polymarket_start for clearer intent.", "inputSchema": {"type": "object", "properties": {"paused": {"type": "boolean", "description": "True to pause, False to resume"}, "updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}, "required": ["paused"]}},
         {"name": "polymarket_pause", "description": "Pause the bot (stops opening new trades; requires CONTROL_SECRET).", "inputSchema": {"type": "object", "properties": {"updated_by": {"type": "string", "default": "hermes", "description": "Who triggered the change"}}}},
@@ -136,7 +137,11 @@ def _call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
             "portfolio_daily_pnl_usd": portfolio.get("daily_pnl"),
             "portfolio_circuit_breaker_triggered": portfolio.get("circuit_breaker_triggered"),
             "drawdown_breaker_tripped": drawdown.get("tripped") if "error" not in drawdown else None,
-            "recent_fills": state.get("fills", [])[:5],
+            # Was state.get("fills", [])[:5] -- capped at 5 fills system-wide regardless
+            # of what was asked for, and sourced from /api/state's own 100-fill cap on
+            # top of that. Use polymarket_fills directly for anything beyond a quick
+            # glance; this stays small on purpose since it's meant as a summary.
+            "recent_fills": _get("/api/fills", {"limit": "5"}).get("fills", []),
         }
     if name == "polymarket_drawdown":
         return _get("/api/drawdown")
@@ -145,7 +150,9 @@ def _call_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
     if name == "polymarket_calibration":
         return _get("/api/calibration", {"asset": args.get("asset", "BTC")})
     if name == "polymarket_recent_trades":
-        return _get("/api/recent_trades", {"asset": args.get("asset", "BTC"), "status": args.get("status", "EXECUTED"), "limit": str(args.get("limit", 50))})
+        return _get("/api/recent_trades", {"asset": args.get("asset", "ALL"), "status": args.get("status", "EXECUTED"), "limit": str(args.get("limit", 50))})
+    if name == "polymarket_fills":
+        return _get("/api/fills", {"asset": args.get("asset", "ALL"), "type": args.get("type", ""), "limit": str(args.get("limit", 100))})
     if name == "polymarket_logs":
         return _get("/api/logs", {"lines": str(args.get("lines", 40))})
     if name == "polymarket_control":
@@ -213,9 +220,14 @@ def main() -> None:
         return _call_tool("polymarket_calibration", {"asset": asset})
 
     @server.tool()
-    def polymarket_recent_trades(asset: str = "BTC", status: str = "EXECUTED", limit: int = 50) -> dict[str, Any]:
-        """Get recent trades."""
+    def polymarket_recent_trades(asset: str = "ALL", status: str = "EXECUTED", limit: int = 50) -> dict[str, Any]:
+        """Get recent trades (all assets by default), including why each one was taken."""
         return _call_tool("polymarket_recent_trades", {"asset": asset, "status": status, "limit": limit})
+
+    @server.tool()
+    def polymarket_fills(asset: str = "ALL", type: str = "", limit: int = 100) -> dict[str, Any]:
+        """Full settlement history (BUY/WIN/LOSS with net_pnl), all assets by default, real pagination."""
+        return _call_tool("polymarket_fills", {"asset": asset, "type": type, "limit": limit})
 
     @server.tool()
     def polymarket_logs(lines: int = 40) -> dict[str, Any]:
