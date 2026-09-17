@@ -73,13 +73,14 @@ class EmpiricalCalibrator:
                 writer.writerow([
                     "timestamp", "window_id", "tau_sec", "moneyness", "vol_annualized",
                     "ofi", "cbi", "z", "p_model", "p_model_shadow", "p_market", "realized_up",
-                    "spot_lead_lag", "twap_dev", "book_depth_skew"
+                    "spot_lead_lag", "twap_dev", "book_depth_skew", "momentum_normalized"
                 ])
         else:
             self._ensure_header()
             self._migrate_add_shadow_column()
             self._migrate_add_cbi_column()
             self._migrate_add_edge_research_columns()
+            self._migrate_add_momentum_column()
 
     def _ensure_header(self):
         """
@@ -108,7 +109,7 @@ class EmpiricalCalibrator:
                 f.write(
                     "timestamp,window_id,tau_sec,moneyness,vol_annualized,ofi,cbi,z,"
                     "p_model,p_model_shadow,p_market,realized_up,spot_lead_lag,twap_dev,"
-                    "book_depth_skew\n"
+                    "book_depth_skew,momentum_normalized\n"
                 )
                 f.write(rest)
             logger.warning(f"Calibrator: {self.log_path} was missing its header row -- prepended it (no data rows touched).")
@@ -143,6 +144,39 @@ class EmpiricalCalibrator:
             )
         except Exception as e:
             logger.error(f"Failed to migrate calibration_log.csv for edge research columns: {e}")
+
+    def _migrate_add_momentum_column(self):
+        """
+        Adds the momentum_normalized shadow column to calibration_log.csv if missing.
+        momentum_drift_weight has never been validated against live outcomes the way
+        cbi_drift_weight was (2026-09-17) -- this column exists so that once enough
+        live data accumulates, the same out-of-sample regression check can be run
+        against momentum, not just asserted from backtest.
+        """
+        try:
+            with open(self.log_path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+            if not rows:
+                return
+            header = rows[0]
+            if "momentum_normalized" in header:
+                return
+            new_header = header + ["momentum_normalized"]
+            new_rows = [new_header]
+            for row in rows[1:]:
+                if not row:
+                    continue
+                new_rows.append(row + [""])
+            with open(self.log_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerows(new_rows)
+            logger.info(
+                f"Calibrator: Migrated calibration_log.csv to include momentum_normalized column "
+                f"({len(new_rows) - 1} existing rows backfilled)."
+            )
+        except Exception as e:
+            logger.error(f"Failed to migrate calibration_log.csv for momentum_normalized column: {e}")
 
     def _migrate_add_shadow_column(self):
         """
@@ -244,7 +278,8 @@ class EmpiricalCalibrator:
         cbi: float = 0.0,
         spot_lead_lag: float = 0.0,
         twap_dev: float = 0.0,
-        book_depth_skew: float = 0.0
+        book_depth_skew: float = 0.0,
+        momentum_normalized: float = 0.0
     ):
         obs = {
             "timestamp": time.time(),
@@ -260,7 +295,8 @@ class EmpiricalCalibrator:
             "p_market": round(p_market, 4),
             "spot_lead_lag": round(spot_lead_lag, 6),
             "twap_dev": round(twap_dev, 6),
-            "book_depth_skew": round(book_depth_skew, 4)
+            "book_depth_skew": round(book_depth_skew, 4),
+            "momentum_normalized": round(momentum_normalized, 4)
         }
         self.pending_window_observations.append(obs)
         now = time.time()
@@ -299,7 +335,8 @@ class EmpiricalCalibrator:
                         realized_up,
                         o.get("spot_lead_lag", 0.0),
                         o.get("twap_dev", 0.0),
-                        o.get("book_depth_skew", 0.0)
+                        o.get("book_depth_skew", 0.0),
+                        o.get("momentum_normalized", 0.0)
                     ])
             logger.info(f"Calibrator: Flushed {len(matching)} observations for window {window_id} (Outcome: {'UP (1)' if realized_up else 'DOWN (0)'})")
         except Exception as e:

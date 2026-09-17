@@ -723,7 +723,8 @@ class AssetTradingEngine:
             cbi=cbi,
             spot_lead_lag=spot_lead_lag,
             twap_dev=twap_dev,
-            book_depth_skew=book_depth_skew
+            book_depth_skew=book_depth_skew,
+            momentum_normalized=norm_momentum
         )
 
         market_info = {
