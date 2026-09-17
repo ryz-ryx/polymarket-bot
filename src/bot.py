@@ -87,9 +87,24 @@ class AssetTradingEngine:
         # zone, not toward it, so this doesn't touch the max_entry_price<=0.55 safety band) nets:
         # ETH 85 trades/77.6% win/$1.077 avg/$91.54 total (vs BTC-config's 75.0%/$0.842/$90.91);
         # SOL 112 trades/71.4% win/$0.862 avg/$96.54 total (vs BTC-config's 71.5%/$0.695/$90.29).
+        # cbi_drift_weight retuned 2026-09-17 from an out-of-sample logistic-regression fit
+        # against each asset's own calibration_log.csv (z_base/ofi/cbi -> realized_up, 70/30
+        # train/test split, NOT in-sample -- this is the check the Sept 15 min_abs_z/entry-band
+        # tuning above skipped, which is why that one didn't survive contact with live trading).
+        # Fitted CBI coefficient (logit scale) was 2.89/1.92/1.51 for BTC/ETH/SOL against a
+        # z_base coefficient of ~0.9-1.2 -- i.e. CBI is the single most informative feature the
+        # strategy already computes, but the previous cbi_drift_weight=0.08 gave it ~1/10th the
+        # influence of moneyness/vol drift. Converting logit-scale coefficients to this model's
+        # probit (norm.cdf) scale (divide by ~1.7) and applying a safety margin below the fitted
+        # value: BTC 0.08->1.0, ETH/SOL 0.08->0.8/0.7. On held-out test data this closed the gap
+        # to market_brier substantially and for BTC surpassed it (0.1434 refit vs 0.1498 market
+        # vs 0.1564 previous live model). ofi_drift_weight left untouched -- its fitted
+        # coefficient was small and inconsistent in sign across assets (0.31/0.01/-0.15), not
+        # strong enough evidence to justify a change.
         eth_sol_params = dict(
             min_edge=0.03,
             slippage_buffer=config.slippage_tolerance,
+            cbi_drift_weight=0.75,
             min_abs_z=0.70,
             min_strike_distance_pct=0.0003,
             tail_dof=None,
@@ -99,6 +114,7 @@ class AssetTradingEngine:
         btc_params = dict(
             min_edge=0.03,
             slippage_buffer=config.slippage_tolerance,
+            cbi_drift_weight=1.0,
             min_abs_z=0.55,
             min_strike_distance_pct=0.0003,
             tail_dof=None,
