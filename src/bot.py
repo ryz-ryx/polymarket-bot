@@ -41,10 +41,18 @@ class AssetTradingEngine:
         # two assets trading concurrently would collide on the same window_id key.
         file_suffix = "" if self.asset == "BTC" else f"_{self.asset.lower()}"
 
+        # ETH/SOL sized down to 35% of BTC's kelly_fraction: 103-trade live sample (2026-09-17)
+        # shows BTC at 56.8% win / +$8.39 net while ETH is 45.2% win / -$2.57 net and SOL is
+        # 45.7% win / +$0.71 net -- i.e. flat-to-losing, not just "less good than BTC". Cutting
+        # size (not disabling) keeps both assets live for continued calibration data collection
+        # without their currently-unproven edge dragging portfolio PnL at full size. Revisit once
+        # each asset has its own validated live calibration curve, not just a backtest one.
+        asset_kelly_fraction = config.kelly_fraction if self.asset == "BTC" else config.kelly_fraction * 0.35
+
         self.risk_manager = RiskManager(
             max_position_usd=config.max_position_usd,
             max_daily_loss_usd=config.max_daily_loss_usd,
-            kelly_fraction=config.kelly_fraction,
+            kelly_fraction=asset_kelly_fraction,
             state_file=f"data/risk_state{file_suffix}.json"
         )
 
