@@ -607,11 +607,14 @@ class AssetTradingEngine:
         raw_vol_ann = self.spot_feed.annualized_vol
         ofi = self.spot_feed.get_ofi_normalized()
         # Lookback raised 10s -> 180s (see spot_feed.py second_buckets comment for the
-        # validation this is based on). Normalization divisor scaled with it: previous /50.0
-        # was calibrated for 10s price-diff stdev (~$15.3 on BTC), keeping most values within
-        # ~3.3 stdev before clipping to [-1,1]; 180s price-diff stdev is ~$64.7 (measured off
-        # the same Binance klines used to validate the lookback), so /200.0 preserves that same
-        # ~3.3x-stdev-before-saturation convention rather than clipping to +-1 almost always.
+        # validation this is based on). This is a single shared code path across all three
+        # AssetTradingEngine instances (BTC/ETH/SOL), so it must not be normalized against a
+        # fixed dollar amount -- validating ETH/SOL against their own downloaded history
+        # (2026-09-17, 3590/3214 windows) surfaced that BTC/ETH/SOL have wildly different
+        # absolute price scales (180s price-diff stdev: BTC ~$64.7, ETH ~$3.17, SOL ~$0.17)
+        # but nearly IDENTICAL relative-return scales (0.093%/0.129%/0.174%). A fixed dollar
+        # divisor (originally /200.0, tuned for BTC) would have made momentum's drift
+        # contribution near-zero for ETH and vanishingly small for SOL.
         momentum = self.spot_feed.get_momentum(lookback_seconds=180.0)
 
         # Proposal 2: Deribit DVOL implied volatility blending
@@ -661,7 +664,12 @@ class AssetTradingEngine:
         total_depth = yes_bid_depth + yes_ask_depth
         cbi = (yes_bid_depth - yes_ask_depth) / total_depth if total_depth > 0 else 0.0
 
-        norm_momentum = max(min(momentum / 200.0, 1.0), -1.0)
+        # Relative return, not a fixed dollar divisor -- see the momentum lookback comment
+        # above. Divisor 0.006 (0.6%) keeps ~3.3x the largest measured 180s relative-return
+        # stdev (SOL, ~0.174%) before saturating to +-1, the same convention the original
+        # /50.0 (10s, BTC-only) divisor used, now scale-invariant across assets.
+        momentum_rel = (momentum / spot_price) if spot_price > 0 else 0.0
+        norm_momentum = max(min(momentum_rel / 0.006, 1.0), -1.0)
         regime_factor = self.spot_feed.get_regime_factor()
         raw_p_model, z = self.strategy.calculate_fair_probability(
             S_t=pricing_spot,
