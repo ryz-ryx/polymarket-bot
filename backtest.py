@@ -168,10 +168,10 @@ def run_backtest_for_asset(
             continue
             
         # Spot price at minute 2 close: exactly 180s elapsed into the 300s window -> tau_seconds = 120.0
-        # Dollar change over the last minute (minute 1 close to minute 2 close)
-        mom_dollar = mid_spot - group.loc[1, "close"]
-        # Production normalization from evaluate() in src/strategies/claud_quant.py: momentum / 50.0
-        norm_momentum = max(min(mom_dollar / 50.0, 1.0), -1.0)
+        # Dollar change over the last 180s (window open to minute 2 close)
+        mom_dollar = mid_spot - group.loc[0, "open"]  # 180s lookback, matches live
+        # Production normalization from src/bot.py: (180s momentum / spot) / 0.006
+        norm_momentum = max(min((mom_dollar / mid_spot) / 0.006, 1.0), -1.0)  # relative return, as in src/bot.py
         
         p_model, z = strategy.calculate_fair_probability(
             S_t=mid_spot,

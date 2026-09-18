@@ -18,3 +18,7 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Ad-hoc analysis output
+scratch_tmp/
+skills-lock.json

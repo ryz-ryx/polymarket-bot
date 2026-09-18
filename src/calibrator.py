@@ -570,8 +570,9 @@ class EmpiricalCalibrator:
         `rolling_window` distinct settled windows (all available if fewer).
         Returns a weight in [0,1]: 1.0 = fully trust the model's own probability,
         0.0 = fully defer to the market's own implied probability. Requires at
-        least `min_windows` distinct settled windows before shrinking at all --
-        returns 1.0 below that threshold so early noise can't neuter the model.
+        least `min_windows` distinct settled windows before measuring -- below that
+        it returns COLD_START_CONFIDENCE (default 0.5) so a fresh volume never
+        gets full model trust before there is evidence.
         Uses the SAME representative-row-per-window selection (closest tau to
         150s) as fit_calibration_curve(), for consistency.
 
@@ -584,8 +585,9 @@ class EmpiricalCalibrator:
         what corrects that underconfidence, so judging the model pre-calibration
         double-penalizes the same miscalibration this method exists to price in.
         """
+        cold_start_weight = max(0.0, min(1.0, float(os.getenv("COLD_START_CONFIDENCE", "0.5"))))
         if not os.path.exists(self.log_path):
-            return 1.0
+            return cold_start_weight
         try:
             window_groups: Dict[str, List[Dict[str, Any]]] = {}
             with open(self.log_path, "r", encoding="utf-8") as f:
@@ -598,7 +600,7 @@ class EmpiricalCalibrator:
                             window_groups[wid] = []
                         window_groups[wid].append(row)
             if len(window_groups) < min_windows:
-                return 1.0
+                return cold_start_weight
 
             window_items = []
             for wid, rows in window_groups.items():

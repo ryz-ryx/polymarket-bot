@@ -191,6 +191,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path
 
+            if (path.startswith("/api/") and path != "/api/version"
+                    and os.getenv("REQUIRE_READ_AUTH", "false").lower() == "true"):
+                secret = config.control_secret
+                if not secret or not hmac.compare_digest(self.headers.get("X-Control-Secret", ""), secret):
+                    self._send_json({"error": "invalid or missing X-Control-Secret header"}, status=401)
+                    return
+
             if path in ("/", "/index.html"):
                 self.serve_html()
             elif path == "/api/state":

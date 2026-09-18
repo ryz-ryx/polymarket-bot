@@ -23,8 +23,8 @@ def run_variant(real, spot_groups, **strategy_kwargs):
         vol_ann = group.loc[2, "vol_ann"]
         if pd.isna(vol_ann) or vol_ann <= 0:
             continue
-        mom_dollar = mid_spot - group.loc[1, "close"]
-        norm_momentum = max(min(mom_dollar / 50.0, 1.0), -1.0)
+        mom_dollar = mid_spot - group.loc[0, "open"]  # 180s lookback, matches live
+        norm_momentum = max(min((mom_dollar / mid_spot) / 0.006, 1.0), -1.0)  # relative return, as in src/bot.py
 
         yes_ask_real = row["yes_ask_real"]
         no_ask_real = 1.0 - yes_ask_real

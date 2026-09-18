@@ -33,7 +33,10 @@ def _get(path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         qs = "?" + "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items())
     url = f"{BASE}{path}{qs}"
     log.info("GET %s", url)
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    get_headers = {"Accept": "application/json"}
+    if CONTROL_SECRET:
+        get_headers["X-Control-Secret"] = CONTROL_SECRET
+    req = urllib.request.Request(url, headers=get_headers)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())

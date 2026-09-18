@@ -60,7 +60,9 @@ def _send(chat_id, text):
 
 
 def _get(path, **params):
-    r = requests.get(f"{BASE_URL}{path}", params=params, timeout=15)
+    secret = os.getenv("CONTROL_SECRET", "")
+    r = requests.get(f"{BASE_URL}{path}", params=params, timeout=15,
+                     headers={"X-Control-Secret": secret} if secret else None)
     r.raise_for_status()
     return r.json()
 

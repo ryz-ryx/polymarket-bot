@@ -58,6 +58,8 @@ async def _api(method: str, path: str, *, params: Optional[Dict] = None,
     if params:
         kwargs["params"] = params
     headers: Dict[str, str] = {}
+    if CONTROL_SECRET:
+        headers["X-Control-Secret"] = CONTROL_SECRET
     if extra_headers:
         headers.update(extra_headers)
     if method.upper() == "POST":
@@ -293,12 +295,12 @@ async def resolve_control(text: str) -> str:
         return "❌ Control actions are disabled — CONTROL_SECRET is not set. Pull it from Railway's Variables tab and set it in the chat bot's env to enable pause/resume from chat."
     lowered = text.lower()
     if any(w in lowered for w in ["pause", "stop", "halt"]):
-        d = await api_post_with_secret("api/control", {"pause": True}, CONTROL_SECRET)
+        d = await api_post_with_secret("api/control", {"paused": True}, CONTROL_SECRET)
         if "error" in d:
             return f"❌ Failed to pause: {d.get('error')} — {d.get('body', '')[:200]}"
         return "✅ Bot paused. Trade evaluation halted until resumed."
     elif any(w in lowered for w in ["resume", "start", "restart", "unpause", "continue"]):
-        d = await api_post_with_secret("api/control", {"pause": False}, CONTROL_SECRET)
+        d = await api_post_with_secret("api/control", {"paused": False}, CONTROL_SECRET)
         if "error" in d:
             return f"❌ Failed to resume: {d.get('error')} — {d.get('body', '')[:200]}"
         return "✅ Bot resumed. Trade evaluation active again."
