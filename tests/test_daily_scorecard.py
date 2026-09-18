@@ -1,6 +1,15 @@
 import random
 
-from scripts.daily_scorecard import futility_checks
+from scripts.daily_scorecard import contamination_check, futility_checks
+
+
+def test_contamination_clean_and_flagged():
+    ok = [{"asset": "BTC", "type": "WIN", "window_id": 1, "ts": 10.0, "source": "POLYMARKET_ONCHAIN"}]
+    assert "clean" in contamination_check(ok, 0)[0]
+    bad = ok + [{"asset": "BTC", "type": "LOSS", "window_id": 2, "ts": 11.0, "source": "BINANCE_FALLBACK"},
+                {"asset": "BTC", "type": "CORRECTION", "window_id": 3, "ts": 12.0}]
+    out = contamination_check(bad, 0)
+    assert "WARNING 1 settled" in out[0] and "1 CORRECTION" in out[0] and "[2, 3]" in out[0]
 
 
 def _fills(n, win_prob, seed=1, price=0.5, stake=1.0):

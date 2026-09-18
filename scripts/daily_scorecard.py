@@ -37,6 +37,23 @@ def settled_in_order(fills, since_ts, asset="BTC"):
     return sorted(out)
 
 
+def contamination_check(fills, since_ts, asset="BTC"):
+    """Flag post-freeze trades whose result is not on-chain confirmed, and any CORRECTION rows.
+    A Binance-fallback WIN/LOSS can be wrong until Polymarket resolves, and a CORRECTION row does
+    not amend the original WIN/LOSS row, so either can skew the 200-trade tally."""
+    post = [f for f in fills if f.get("asset") == asset and f.get("ts", 0) >= since_ts]
+    settled = [f for f in post if f.get("type") in ("WIN", "LOSS")]
+    off_chain = [f for f in settled if f.get("source") != "POLYMARKET_ONCHAIN"]
+    corrections = [f for f in post if f.get("type") == "CORRECTION"]
+    if not off_chain and not corrections:
+        return [f"contamination check: clean ({len(settled)} settled, all POLYMARKET_ONCHAIN, 0 corrections)"]
+    lines = [f"contamination check: WARNING {len(off_chain)} settled not on-chain confirmed, "
+             f"{len(corrections)} CORRECTION rows (windows: "
+             f"{sorted({f.get('window_id') for f in off_chain + corrections})})"]
+    lines.append("  -> re-score with those windows excluded, and with them flipped, before trusting the verdict")
+    return lines
+
+
 def futility_checks(fills, since_ts):
     """FREEZE.md futility stop: at each look, kill if the 95% bootstrap UPPER bound of net PnL per $ staked < 0."""
     trades = settled_in_order(fills, since_ts)
@@ -79,7 +96,7 @@ def main():
         print("note: early rates are noisy; pre-freeze data showed ~2/hour on one day, ~0 on others.")
     else:
         print("rate: n/a (no post-freeze settlements yet)")
-    for line in futility_checks(fills, since):
+    for line in contamination_check(fills, since) + futility_checks(fills, since):
         print(line)
     print("-" * 60)
     cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "random_baseline.py"),
