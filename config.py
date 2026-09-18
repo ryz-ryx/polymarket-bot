@@ -28,6 +28,14 @@ class BotConfig(BaseModel):
     target_assets: List[str] = [
         a.strip().upper() for a in os.getenv("TARGET_ASSETS", "").split(",") if a.strip()
     ] or [target_asset]
+    # Council recommendation 2026-09-18: only BTC has shown a positive profit rate
+    # (+6.4% vs ETH -27.6% / SOL -8.6% on the tracked paper sample). Any asset not in
+    # this allowlist is dropped from target_assets no matter what TARGET_ASSETS says
+    # (so a stale Railway env var can't silently re-enable ETH/SOL). Add an asset here
+    # only after it clears the forward-test bar (scripts/forward_test_report.py).
+    proven_assets: List[str] = [
+        a.strip().upper() for a in os.getenv("PROVEN_ASSETS", "BTC").split(",") if a.strip()
+    ]
 
     # TOTAL capital available across ALL traded assets combined (real funded wallet
     # balance, not a per-asset allowance) -- e.g. one $25 USDC wallet shared by
@@ -72,6 +80,12 @@ class BotConfig(BaseModel):
     # real order would never be accepted for. $1.00 is Polymarket's documented
     # CLOB minimum order size.
     min_order_usd: float = float(os.getenv("MIN_ORDER_USD", "1.0"))
+    # Paper-trading realism: refuse simulated fills with less than this many seconds left
+    # in the window. The two earliest local paper fills were at tau=1.3s and 14s with
+    # p_model=1.0 against a stale-looking ask -- a real FOK order (sign + POST + match)
+    # can't reliably fill that late, so paper PnL there is phantom. Paper only; the frozen
+    # strategy and live path are untouched. Set 0 to disable.
+    paper_min_entry_tau_sec: float = float(os.getenv("PAPER_MIN_ENTRY_TAU_SEC", "15.0"))
     spot_exchange: str = os.getenv("SPOT_EXCHANGE", "binance").lower()
 
     # Discord / Telegram alerts (both optional -- unset means that channel is silently
@@ -93,3 +107,7 @@ class BotConfig(BaseModel):
     control_secret: str = os.getenv("CONTROL_SECRET", "")
 
 config = BotConfig()
+# Enforce the proven-asset allowlist (see proven_assets above). Fail closed to BTC
+# if the filter would otherwise leave nothing to trade.
+_filtered_assets = [a for a in config.target_assets if a in config.proven_assets]
+config.target_assets = _filtered_assets or [config.target_asset]

@@ -185,6 +185,7 @@ class AssetTradingEngine:
         self.strike_price = None
 
         self.resolutions_file = f"data/pending_resolutions{file_suffix}.json"
+        self.oracle_log_path = f"data/oracle_divergence{file_suffix}.csv"
         self.pending_resolutions: List[Dict[str, Any]] = []
         self._load_pending_resolutions()
 
@@ -228,6 +229,25 @@ class AssetTradingEngine:
                 json.dump(self.fallback_reconciliation, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save fallback reconciliation queue to disk: {e}")
+
+    def _log_oracle_divergence(self, item: Dict[str, Any], outcome: int) -> None:
+        """Append one row per confirmed window comparing the Binance-derived call to
+        Polymarket's real (Chainlink) settlement, so the divergence rate is measurable
+        offline instead of living only in log lines. Best-effort: never raises."""
+        try:
+            path = self.oracle_log_path
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            new_file = not os.path.exists(path)
+            with open(path, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                if new_file:
+                    w.writerow(["window_id", "slug", "strike_k", "snapshot", "twap_30", "twap_60",
+                                "binance_estimate", "outcome", "diverged"])
+                est = item["binance_estimate"]
+                w.writerow([item["window_id"], item["slug"], item["strike_k"], item.get("snapshot_price"),
+                            item.get("twap_30"), item.get("twap_60"), est, outcome, int(est != outcome)])
+        except Exception as e:
+            logger.warning(f"oracle divergence log write failed: {type(e).__name__}: {e}")
 
     async def _poll_deferred_resolutions(self):
         now = time.time()
@@ -276,6 +296,7 @@ class AssetTradingEngine:
                     logger.info(f"[ESTIMATOR SCORECARD] Window {window_id}: {' '.join(scorecard)}")
 
                 logger.info(f"[POLYMARKET RESOLUTION CONFIRMED] Window {window_id} ({slug}) -> Outcome: {'UP (1)' if outcome == 1 else 'DOWN (0)'}{divergence_msg}")
+                self._log_oracle_divergence(item, outcome)
 
                 try:
                     self.calibrator.resolve_window(
@@ -1012,6 +1033,25 @@ class AssetTradingEngine:
                             status="BLOCKED_MIN_ORDER_SIZE",
                             size_usd=0.0
                         )
+                    elif (
+                        size > 0
+                        and self.executor.paper_trading
+                        and time_remaining_sec < config.paper_min_entry_tau_sec
+                    ):
+                        # Too late for a real order to fill: block the phantom paper fill.
+                        self.event_logger.log_event(
+                            window_id=self.current_window_id,
+                            tau_sec=time_remaining_sec,
+                            outcome=signal["outcome"],
+                            z=z,
+                            p_model=signal["estimated_prob"],
+                            direct_ask=exec_price,
+                            direct_spread=direct_spread,
+                            real_edge=real_edge,
+                            hurdle=direct_hurdle,
+                            status="BLOCKED_LATE_WINDOW",
+                            size_usd=0.0
+                        )
                     elif size > 0:
                         # Proposal 3: Order-Book Depth & Realistic Book Walking
                         # Walk the direct ask order book to obtain the true VWAP fill price across depth
@@ -1080,8 +1120,29 @@ class AssetTradingEngine:
                                     status="BLOCKED_HURDLE",
                                     size_usd=0.0
                                 )
+                            elif (
+                                (self.strategy.max_entry_price is not None and vwap_price > self.strategy.max_entry_price)
+                                or (self.strategy.min_entry_price is not None and vwap_price < self.strategy.min_entry_price)
+                            ):
+                                # The entry-price band was checked on the best ask, but the
+                                # fill lands at the post-latency VWAP. Live paper fills at
+                                # 0.57-0.61 slipped past the 0.55 cap this way -- enforce the
+                                # band on the price actually paid.
+                                self.event_logger.log_event(
+                                    window_id=self.current_window_id,
+                                    tau_sec=time_remaining_sec,
+                                    outcome=signal["outcome"],
+                                    z=z,
+                                    p_model=signal["estimated_prob"],
+                                    direct_ask=vwap_price,
+                                    direct_spread=direct_spread,
+                                    real_edge=vwap_edge,
+                                    hurdle=vwap_hurdle,
+                                    status="BLOCKED_PAYOUT_RATIO",
+                                    size_usd=0.0
+                                )
                             else:
-                                token_target = self.market_feed.token_id_yes if is_yes else (self.market_feed.token_id_no or "token_no")
+                                token_target =self.market_feed.token_id_yes if is_yes else (self.market_feed.token_id_no or "token_no")
                                 active_slug = self.market_feed.get_slug_for_window(self.current_window_start)
                                 exec_result = await self.executor.execute_trade(
                                     window_id=self.current_window_id,
