@@ -493,9 +493,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             wins = sum(1 for f in fills if f.get("type") == "WIN")
             losses = sum(1 for f in fills if f.get("type") == "LOSS")
             settled = wins + losses
-            # net_pnl on WIN/LOSS fills is already post-fee (fee is subtracted at
-            # entry, baked into cost/payout at settlement) -- see OrderExecutor.
-            net_pnl = sum(_safe_float(f.get("net_pnl")) for f in fills if f.get("type") in ("WIN", "LOSS"))
+            # WIN/LOSS net_pnl is payout - cost only; the taker fee is charged
+            # separately on the BUY fill (deducted from balance at entry), so
+            # subtract it here to match the real balance change.
+            net_pnl = (sum(_safe_float(f.get("net_pnl")) for f in fills if f.get("type") in ("WIN", "LOSS"))
+                       - sum(_safe_float(f.get("fee_paid")) for f in fills if f.get("type") == "BUY"))
             win_rate = (wins / settled) if settled > 0 else None
             sample_sufficient = settled >= min_sample
 
