@@ -124,7 +124,7 @@ def main():
         }
         signal = strategy.evaluate(
             spot_price=mid_spot,
-            momentum=mom_dollar,
+            momentum_normalized=norm_momentum,
             market_info=market_info,
             order_book={"cbi": 0.0},
             confidence_weight=1.0,

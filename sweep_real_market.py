@@ -24,6 +24,7 @@ def run_variant(real, spot_groups, **strategy_kwargs):
         if pd.isna(vol_ann) or vol_ann <= 0:
             continue
         mom_dollar = mid_spot - group.loc[1, "close"]
+        norm_momentum = max(min(mom_dollar / 50.0, 1.0), -1.0)
 
         yes_ask_real = row["yes_ask_real"]
         no_ask_real = 1.0 - yes_ask_real
@@ -35,7 +36,7 @@ def run_variant(real, spot_groups, **strategy_kwargs):
             "no_ask": no_ask_real,
         }
         signal = strategy.evaluate(
-            spot_price=mid_spot, momentum=mom_dollar, market_info=market_info,
+            spot_price=mid_spot, momentum_normalized=norm_momentum, market_info=market_info,
             order_book={"cbi": 0.0}, confidence_weight=1.0,
         )
         if signal is None:

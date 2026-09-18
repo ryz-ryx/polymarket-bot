@@ -114,10 +114,31 @@ class AssetTradingEngine:
         # conversion validated yesterday (BTC's 1.0 stays put, it's already close to its fresh
         # coefficient) but scaled up for ETH/SOL to close that gap, with a safety margin still
         # short of the raw fitted value: 0.75 -> 1.4.
+        # book_depth_skew_drift_weight added 2026-09-18: this signal was computed every tick
+        # for shadow logging only (bot.py's calibration_log columns) but never fed into the
+        # actual live trade decision -- found while investigating why ETH/SOL underperform.
+        # It's highly correlated with CBI (0.87-0.96 corr across assets) but its coefficient
+        # survives controlling for CBI, with a stable negative sign across 5-fold CV AND a
+        # time-ordered 70/30 split (not just a random split, which would be vulnerable to
+        # collinearity overfitting): BTC brier 0.1259->0.1257 (negligible, left at 0.0), ETH
+        # 0.1364->0.1311, SOL 0.1295->0.1267 (both meaningful, real). Fitted coefficients
+        # (time-split, net of CBI) were -1.15/-1.52 for ETH/SOL; applying the same conversion
+        # ratio used for cbi_drift_weight (~0.33, with an added safety margin since this is
+        # the first time this signal has ever been live) gives -0.23.
+        #
+        # ALSO discovered and fixed in the same investigation: strategy.evaluate() -- the
+        # function that actually executes trades -- had its OWN internal momentum
+        # normalization (a fixed momentum/50.0 dollar divisor, calibrated only for BTC's
+        # price scale) completely separate from the tick()-level one. This meant the
+        # 2026-09-17 momentum fix (180s lookback, relative-return normalization) never
+        # actually reached live trade decisions -- it only affected the calibration_log
+        # shadow columns. Fixed by having evaluate() accept the already-correct
+        # momentum_normalized value directly instead of silently recomputing a wrong one.
         eth_sol_params = dict(
             min_edge=0.03,
             slippage_buffer=config.slippage_tolerance,
             cbi_drift_weight=1.4,
+            book_depth_skew_drift_weight=-0.23,
             min_abs_z=0.70,
             min_strike_distance_pct=0.0003,
             tail_dof=None,
@@ -684,6 +705,14 @@ class AssetTradingEngine:
         momentum_rel = (momentum / spot_price) if spot_price > 0 else 0.0
         norm_momentum = max(min(momentum_rel / 0.006, 1.0), -1.0)
         regime_factor = self.spot_feed.get_regime_factor()
+
+        # Multilevel book depth skew across top bids/asks -- moved up from its old spot below
+        # (was shadow-logging-only) since it's now a live drift input, see 2026-09-18 fix.
+        bids_depth = sum(float(l["size"]) for l in live_quotes.get("yes_bids", [])[:3] if isinstance(l, dict) and "size" in l)
+        asks_depth = sum(float(l["size"]) for l in live_quotes.get("yes_asks", [])[:3] if isinstance(l, dict) and "size" in l)
+        tot_depth = bids_depth + asks_depth
+        book_depth_skew = (bids_depth - asks_depth) / tot_depth if tot_depth > 0 else 0.0
+
         raw_p_model, z = self.strategy.calculate_fair_probability(
             S_t=pricing_spot,
             K=self.strike_price,
@@ -692,6 +721,7 @@ class AssetTradingEngine:
             ofi_normalized=ofi,
             momentum_normalized=norm_momentum,
             cbi_normalized=cbi,
+            book_depth_skew_normalized=book_depth_skew,
             known_avg_price=known_avg_price,
             twap_window_sec=TWAP_SETTLEMENT_WINDOW_SEC,
             regime_factor=regime_factor
@@ -731,12 +761,6 @@ class AssetTradingEngine:
         if known_avg_price is not None and spot_price > 0:
             twap_dev = (spot_price - known_avg_price) / spot_price
 
-        # 3. Multilevel book depth skew across top bids/asks
-        bids_depth = sum(float(l["size"]) for l in live_quotes.get("yes_bids", [])[:3] if isinstance(l, dict) and "size" in l)
-        asks_depth = sum(float(l["size"]) for l in live_quotes.get("yes_asks", [])[:3] if isinstance(l, dict) and "size" in l)
-        tot_depth = bids_depth + asks_depth
-        book_depth_skew = (bids_depth - asks_depth) / tot_depth if tot_depth > 0 else 0.0
-
         self.calibrator.log_observation(
             window_id=self.current_window_id,
             tau_sec=time_remaining_sec,
@@ -772,10 +796,11 @@ class AssetTradingEngine:
 
         signal = self.strategy.evaluate(
             spot_price=pricing_spot,
-            momentum=momentum,
+            momentum_normalized=norm_momentum,
             market_info=market_info,
             order_book={"cbi": cbi, **live_quotes},
-            confidence_weight=confidence_weight
+            confidence_weight=confidence_weight,
+            book_depth_skew_normalized=book_depth_skew
         )
 
         # TRADE FUNNEL & GUARDS

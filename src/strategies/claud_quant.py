@@ -49,6 +49,7 @@ class ClaudQuantBinaryOptionStrategy(BaseStrategy):
         ofi_drift_weight: float = 0.12,
         momentum_drift_weight: float = 0.08,
         cbi_drift_weight: float = 0.08,
+        book_depth_skew_drift_weight: float = 0.0,
         min_abs_z: float = 0.35,
         min_strike_distance_pct: float = 0.0003,
         late_window_min_prob: float = 0.75,
@@ -82,6 +83,7 @@ class ClaudQuantBinaryOptionStrategy(BaseStrategy):
         self.ofi_drift_weight = ofi_drift_weight
         self.momentum_drift_weight = momentum_drift_weight
         self.cbi_drift_weight = cbi_drift_weight
+        self.book_depth_skew_drift_weight = book_depth_skew_drift_weight
         self.min_abs_z = min_abs_z
         self.min_strike_distance_pct = min_strike_distance_pct
         self.late_window_min_prob = late_window_min_prob
@@ -98,6 +100,7 @@ class ClaudQuantBinaryOptionStrategy(BaseStrategy):
         ofi_normalized: float = 0.0,
         momentum_normalized: float = 0.0,
         cbi_normalized: float = 0.0,
+        book_depth_skew_normalized: float = 0.0,
         known_avg_price: Optional[float] = None,
         twap_window_sec: float = 60.0,
         regime_factor: float = 1.0
@@ -131,10 +134,17 @@ class ClaudQuantBinaryOptionStrategy(BaseStrategy):
         # Momentum's weight is scaled by regime_factor (variance-ratio regime detector, see
         # SpotFeed.get_regime_factor): >1 in trending regimes where momentum is informative,
         # <1 in mean-reverting chop where a recent move is more likely to snap back.
+        # book_depth_skew (top-3-level bid/ask depth imbalance) is highly correlated with
+        # CBI (0.87-0.96 across assets) but its coefficient survives controlling for CBI --
+        # stable sign across 5-fold CV and a time-ordered (not random) train/test split, see
+        # the 2026-09-18 bot.py comment for the validation. Its negative sign (net of CBI) is
+        # real: once order-flow imbalance is already priced in via CBI, extra resting depth
+        # skew on one side tends to mark support/resistance rather than added momentum.
         drift_adj = (
             (self.ofi_drift_weight * ofi_normalized) +
             (self.momentum_drift_weight * regime_factor * momentum_normalized) +
-            (self.cbi_drift_weight * cbi_normalized)
+            (self.cbi_drift_weight * cbi_normalized) +
+            (self.book_depth_skew_drift_weight * book_depth_skew_normalized)
         )
         z = z_base + drift_adj
 
@@ -150,10 +160,11 @@ class ClaudQuantBinaryOptionStrategy(BaseStrategy):
     def evaluate(
         self,
         spot_price: float,
-        momentum: float,
+        momentum_normalized: float,
         market_info: Dict[str, Any],
         order_book: Dict[str, Any],
-        confidence_weight: float = 1.0
+        confidence_weight: float = 1.0,
+        book_depth_skew_normalized: float = 0.0
     ) -> Optional[Dict[str, Any]]:
         strike_k = market_info.get("strike_price", spot_price)
         time_remaining_sec = market_info.get("time_remaining_sec", 150.0)
@@ -166,17 +177,23 @@ class ClaudQuantBinaryOptionStrategy(BaseStrategy):
         # Extract Contract Book Imbalance (CBI) from Polymarket depth ladder
         cbi = float(order_book.get("cbi", 0.0))
 
-        # Normalize momentum over [-1, 1] relative to typical $50 10s swing
-        norm_momentum = max(min(momentum / 50.0, 1.0), -1.0)
-
+        # momentum_normalized comes in pre-normalized from bot.py's tick() (180s lookback,
+        # relative-return scale -- see the 2026-09-17 fix). This function used to re-derive
+        # its own normalization here via a fixed momentum/50.0 dollar divisor, calibrated only
+        # for BTC's price scale -- that meant the 2026-09-17 momentum fix never actually
+        # reached live trade decisions, only the calibration_log shadow columns, since this
+        # evaluate() path (not the tick()-level calculate_fair_probability call) is what
+        # actually executes trades. Fixed 2026-09-18 by accepting the already-correct value
+        # directly instead of silently recomputing a wrong one.
         p_model_up, z = self.calculate_fair_probability(
             S_t=spot_price,
             K=strike_k,
             tau_seconds=time_remaining_sec,
             annualized_vol=annualized_vol,
             ofi_normalized=ofi,
-            momentum_normalized=norm_momentum,
+            momentum_normalized=momentum_normalized,
             cbi_normalized=cbi,
+            book_depth_skew_normalized=book_depth_skew_normalized,
             known_avg_price=known_avg_price,
             twap_window_sec=twap_window_sec,
             regime_factor=regime_factor
