@@ -39,7 +39,17 @@ class BotConfig(BaseModel):
     max_daily_loss_usd: float = float(os.getenv("MAX_DAILY_LOSS_USD", "10.0"))
     max_portfolio_daily_loss_usd: float = float(os.getenv("MAX_PORTFOLIO_DAILY_LOSS_USD", "20.0"))
     slippage_tolerance: float = float(os.getenv("SLIPPAGE_TOLERANCE", "0.02"))
-    kelly_fraction: float = float(os.getenv("KELLY_FRACTION", "0.125"))
+    # 2026-09-18: lowered 0.125->0.06 after Monte Carlo resampling of the bot's own actual
+    # (stake, outcome) pairs (see Claude outputs/profit_rate_analysis.md) showed a ~66%
+    # chance of a negative portfolio-level run over a 90-trade stretch even under the
+    # measured edge -- classic symptom of sizing against an edge estimate that's still
+    # noisy (Sharpe-like ratios near zero at this sample size). Kelly sizing assumes the
+    # edge/probability estimate is exact; when it isn't, fractional Kelly needs to shrink
+    # further than usual. This trades some expected growth rate for a much lower chance of
+    # tripping the portfolio drawdown breaker before enough data accumulates to know if the
+    # edge is real. Revisit upward only after a multi-day BTC-only sample confirms the edge
+    # holds (see roadmap.md Phase 2/3).
+    kelly_fraction: float = float(os.getenv("KELLY_FRACTION", "0.06"))
     # Staged live rollout: once paper_trading is turned off, each asset's
     # OrderExecutor auto-halts live order placement after this many real
     # fills, falling back to paper mode until manually reset (restart the
