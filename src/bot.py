@@ -101,10 +101,23 @@ class AssetTradingEngine:
         # vs 0.1564 previous live model). ofi_drift_weight left untouched -- its fitted
         # coefficient was small and inconsistent in sign across assets (0.31/0.01/-0.15), not
         # strong enough evidence to justify a change.
+        # cbi_drift_weight re-fit 2026-09-18 against the full calibration_log (146k/140k/140k
+        # rows BTC/ETH/SOL, not the tiny post-reset live sample which is too small to read --
+        # 21 live trades showed p_model uncorrelated with outcome, but that's sample-size noise,
+        # not evidence of no edge). Out-of-sample (70/30 split) logistic regression on
+        # z/ofi/cbi/momentum_normalized -> realized_up found CBI alone (Brier 0.124/0.136/0.138
+        # BTC/ETH/SOL) matches the full model almost exactly -- CBI is carrying essentially all
+        # of the model's edge over market (market Brier 0.178-0.179). Fitted CBI coefficients
+        # came back higher than the 2026-09-17 fit, especially for ETH/SOL: 3.05/3.25/3.40
+        # logit-scale vs the prior 2.89/1.92/1.51 -- ETH/SOL's true CBI coefficient roughly
+        # doubled against what cbi_drift_weight=0.75 was calibrated from. Applying the same
+        # conversion validated yesterday (BTC's 1.0 stays put, it's already close to its fresh
+        # coefficient) but scaled up for ETH/SOL to close that gap, with a safety margin still
+        # short of the raw fitted value: 0.75 -> 1.4.
         eth_sol_params = dict(
             min_edge=0.03,
             slippage_buffer=config.slippage_tolerance,
-            cbi_drift_weight=0.75,
+            cbi_drift_weight=1.4,
             min_abs_z=0.70,
             min_strike_distance_pct=0.0003,
             tail_dof=None,
