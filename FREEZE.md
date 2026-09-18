@@ -26,6 +26,7 @@ If any check fails at the deadline: stop, archive the repo, keep the redemption,
 ## Known open items (not fixed, by design)
 - `daily_pnl` and the drawdown breakers use payout - cost without the buy fee, so they run slightly optimistic. Fixing it changes live risk behavior, so it waits until after the test.
 - Paper fills assume the quoted ask. Real order-book depth is not logged at signal time.
+  (Correction 2026-09-18: paper fills are priced at the walked VWAP after a simulated latency re-fetch of the book, `bot.py` ~L1060-1073. What was not logged was the ladder itself; see bug-fix log.)
 
 ## Bug-fix log
-(none yet)
+- 2026-09-18: added observation-only `_log_book_depth` in `src/bot.py`. Appends the top-5 ask ladder (before and after the simulated latency re-fetch) to `data/book_depth_log.jsonl` at signal time. Best-effort, never raises, no input to any decision, sizing or filter. Tests in `tests/test_book_depth_log.py`. Also: `scripts/random_baseline.py` now takes the freeze start from the commit that added FREEZE.md, so editing this log does not move it; added `scripts/daily_scorecard.py`.

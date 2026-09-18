@@ -186,6 +186,7 @@ class AssetTradingEngine:
 
         self.resolutions_file = f"data/pending_resolutions{file_suffix}.json"
         self.oracle_log_path = f"data/oracle_divergence{file_suffix}.csv"
+        self.book_depth_log_path = f"data/book_depth_log{file_suffix}.jsonl"
         self.pending_resolutions: List[Dict[str, Any]] = []
         self._load_pending_resolutions()
 
@@ -248,6 +249,25 @@ class AssetTradingEngine:
                             item.get("twap_30"), item.get("twap_60"), est, outcome, int(est != outcome)])
         except Exception as e:
             logger.warning(f"oracle divergence log write failed: {type(e).__name__}: {e}")
+
+    def _log_book_depth(self, status: str, outcome: str, size: float, vwap_price: Optional[float],
+                        pre_asks: List[Any], post_asks: List[Any]) -> None:
+        """Append the top of the target-side ask ladder at signal time (before and after the
+        simulated latency refetch) so paper-fill slippage can be checked against real depth
+        offline. Observation only: best-effort, never raises, never feeds a decision."""
+        try:
+            def top(levels):
+                ok = [l for l in (levels or []) if isinstance(l, dict) and "price" in l and "size" in l]
+                return [[float(l["price"]), float(l["size"])] for l in sorted(ok, key=lambda l: l["price"])[:5]]
+            os.makedirs(os.path.dirname(self.book_depth_log_path), exist_ok=True)
+            with open(self.book_depth_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "ts": time.time(), "asset": self.asset, "window_id": self.current_window_id,
+                    "status": status, "outcome": outcome, "size_usd": size, "vwap_price": vwap_price,
+                    "asks_pre_latency": top(pre_asks), "asks_post_latency": top(post_asks),
+                }) + "\n")
+        except Exception as e:
+            logger.warning(f"book depth log write failed: {type(e).__name__}: {e}")
 
     async def _poll_deferred_resolutions(self):
         now = time.time()
@@ -1071,6 +1091,10 @@ class AssetTradingEngine:
                                 target_asks = fresh_asks
 
                         vwap_price, total_cost, total_shares = self.market_feed.simulate_walk_book(target_asks, size)
+                        self._log_book_depth(
+                            "PHANTOM" if vwap_price is None else "SIGNAL", signal["outcome"], size, vwap_price,
+                            live_quotes.get("yes_asks" if is_yes else "no_asks", []), target_asks
+                        )
 
                         if vwap_price is None:
                             # Book lacks depth to fill requested size; avoid phantom fills.

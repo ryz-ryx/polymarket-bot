@@ -42,8 +42,10 @@ def load_fills(url: str, path: str):
 
 def freeze_ts() -> float:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    out = subprocess.run(["git", "log", "-1", "--format=%ct", "--", "FREEZE.md"],
-                         capture_output=True, text=True, cwd=root).stdout.strip()
+    # Commit that ADDED the file, so later bug-fix-log edits don't move the freeze start.
+    out = subprocess.run(["git", "log", "--diff-filter=A", "--format=%ct", "--", "FREEZE.md"],
+                         capture_output=True, text=True, cwd=root).stdout.strip().splitlines()
+    out = out[-1] if out else ""
     if not out:
         sys.exit("FREEZE.md has no commit yet; pass --since")
     return float(out)
