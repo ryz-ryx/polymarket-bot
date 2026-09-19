@@ -18,7 +18,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.random_baseline import DEFAULT_URL, freeze_ts, load_fills, net_pnl, paired_trades  # noqa: E402
 
 TARGET = 200
-DEADLINE = dt.datetime(2026, 10, 16, tzinfo=dt.timezone.utc)
+DEADLINE = dt.datetime(2026, 12, 31, tzinfo=dt.timezone.utc)  # FREEZE.md schedule amendment
+PACE_DATE = dt.datetime(2026, 10, 17, tzinfo=dt.timezone.utc)
+PACE_MIN_TRADES = 30
 LOOKS = (60, 100, 150)  # FREEZE.md futility-stop amendment
 N_BOOT = 10_000
 
@@ -96,6 +98,13 @@ def main():
         print("note: early rates are noisy; pre-freeze data showed ~2/hour on one day, ~0 on others.")
     else:
         print("rate: n/a (no post-freeze settlements yet)")
+    now = dt.datetime.now(dt.timezone.utc)
+    if now >= PACE_DATE:
+        print(f"pace checkpoint {PACE_DATE:%Y-%m-%d}: {n}/{PACE_MIN_TRADES} -> "
+              f"{'OK' if n >= PACE_MIN_TRADES else 'FAIL: infeasible, kill rule applies'}")
+    else:
+        print(f"pace checkpoint {PACE_DATE:%Y-%m-%d}: need {PACE_MIN_TRADES}, have {n} "
+              f"({(PACE_DATE - now).days} days left)")
     for line in contamination_check(fills, since) + futility_checks(fills, since):
         print(line)
     print("-" * 60)

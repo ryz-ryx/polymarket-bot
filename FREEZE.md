@@ -40,6 +40,13 @@ The test never actually ran. The portfolio drawdown breaker tripped 2026-09-18 1
 - Trade counting is unaffected: no trade settled between the original freeze commit and the restart, so scripts that anchor on the FREEZE.md commit time still count exactly the post-restart trades.
 - Consequence to watch: the $18.75 floor leaves about $2.11 of headroom over $20.86 cash. The breaker can trip again after a short losing run and needs a manual clear. If it does, that is the pre-registered capital-preservation rule working, and it goes in the bug-fix log.
 
+## Amendment: schedule and pace rule (written 2026-09-19 ~13:00 UTC; 1 post-restart trade settled, a loss; nothing here depends on outcomes)
+The 200-trade requirement cannot be met by 2026-10-17 at the observed pace (about 1 trade/day since the restart; the scorecard projects 2027-03). Only the calendar changes. The pass rule, kill rule and futility looks (60/100/150) above are unchanged. The sample requirement is NOT lowered.
+- Hard cap replaces the 2026-10-17 max: the test ends at 200 settled post-freeze BTC trades or 2026-12-31, whichever is first. If the cap arrives with fewer than 200 trades the verdict is INCONCLUSIVE, which is treated as FAIL under the kill rule: no live money.
+- Pace checkpoint, evaluated on 2026-10-17: fewer than 30 settled post-freeze BTC trades means the test is infeasible in time and the kill rule applies (archive, keep reusable pieces). This is a pure pace test, not a performance test.
+- The code and parameter freeze (bug-fix-only rule) stays in force until the test ends, not just to 2026-10-03.
+- `scripts/daily_scorecard.py` deadline updated to 2026-12-31 and it now prints the pace checkpoint. Analysis-only.
+
 ## Known open items (not fixed, by design)
 - `daily_pnl` and the drawdown breakers use payout - cost without the buy fee, so they run slightly optimistic. Fixing it changes live risk behavior, so it waits until after the test.
 - Paper fills assume the quoted ask. Real order-book depth is not logged at signal time.
