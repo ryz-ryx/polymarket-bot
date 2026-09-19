@@ -20,7 +20,14 @@ Uncertainty: cluster bootstrap over windows, Bonferroni z = 2.5. Windows ordered
   2c slippage. KILL otherwise. Context rows (not part of the verdict): tau = 20s and 10s.
   A PASS is not a trading claim: it still needs executable-price confirmation from the live L2 book.
 
+FRESH-SAMPLE CONFIRMATION (added 2026-09-19 before any fresh data existed; the original holdout showed only 15
+qualifying trades, +58.6%/$ at 1c, CI [-9.5%, +140%], too few to judge): run with --fresh --exclude <old chunks> on a
+new sample of windows never used before. Rule, model, thresholds, slippage grid and PASS criteria are IDENTICAL and
+are not retuned; every fresh window counts (no split). Verdict L-fresh uses the same PASS rule (>= 100 trades at
+tau = 30s and corrected CI above 0 at both 1c and 2c slippage).
+
 Usage: python scripts/late_lock_test.py [--trades "data/trades/chunk_*.csv.gz"] [--cache data/bn1s_full]
+       python scripts/late_lock_test.py --fresh --trades "data/trades2/chunk_*.csv.gz" --exclude "data/trades/chunk_*.csv.gz"
 """
 import argparse
 import bisect
@@ -118,11 +125,20 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--trades", default="data/trades/chunk_*.csv.gz")
     ap.add_argument("--cache", default="data/bn1s_full")
+    ap.add_argument("--fresh", action="store_true", help="fresh-sample confirmation: every window is holdout")
+    ap.add_argument("--exclude", default=None, help="glob of chunks whose windows are dropped (already-used sample)")
     args = ap.parse_args()
     by_w, res = load_trades(args.trades)
+    if args.exclude:
+        used, _ = load_trades(args.exclude)
+        by_w = {w: v for w, v in by_w.items() if w not in used}
     ws = sorted(by_w)
-    split_w = ws[int(len(ws) * 0.6)]
-    print(f"windows {len(ws)}; holdout from {split_w} ({len(ws) - int(len(ws) * 0.6)} windows)")
+    if args.fresh:
+        split_w = 0
+        print(f"FRESH sample: {len(ws)} windows (all holdout)")
+    else:
+        split_w = ws[int(len(ws) * 0.6)]
+        print(f"windows {len(ws)}; holdout from {split_w} ({len(ws) - int(len(ws) * 0.6)} windows)")
     verdict = True
     for tau in (30, 20, 10):
         for slip in (0.01, 0.02):
