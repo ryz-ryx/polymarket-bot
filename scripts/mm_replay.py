@@ -166,7 +166,8 @@ def main():
     args = ap.parse_args()
 
     events = load_l2(args.l2)
-    with open(args.ticks, "r", encoding="utf-8") as f:
+    opener = gzip.open if args.ticks.endswith(".gz") else open
+    with opener(args.ticks, "rt", encoding="utf-8") as f:
         ticks = Ticks([json.loads(x) for x in f if x.strip()])
     if not events or not ticks.ts:
         sys.exit("need both L2 events and tick_log rows (collector/tick logger must have run)")
