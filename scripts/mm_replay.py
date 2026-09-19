@@ -94,6 +94,8 @@ def simulate(events, ticks, params, use_queue=True, vol_default=0.5):
     resting, inventory, mids = {}, defaultdict(float), defaultdict(list)
     fills = []
     for ev in events:
+        if ev.get("t") not in ("s", "t"):      # ignore other row types, e.g. cross-venue quotes ("x")
+            continue
         w, k, ts = ev["w"], ev["k"], ev["ts"]
         key = (w, k)
         if ev["t"] == "s":

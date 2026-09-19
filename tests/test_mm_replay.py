@@ -55,6 +55,13 @@ def test_summarize_markout_and_settlement():
     assert rows[0]["rebate"] > 0
 
 
+def test_simulate_ignores_cross_venue_rows():
+    ev = [{"t": "x", "ts": 400.0, "v": "binance", "b": 1.0, "a": 2.0, "st": None},
+          _snap(400, "Y", 0.47, 0.50), _trade(401, "Y", 0.47, 50, "S")]
+    fills, _ = simulate(ev, _ticks(), PARAMS)
+    assert len(fills) == 1
+
+
 def test_arb_summary_and_kill_rule():
     eps = [{"start": 0.0, "end": 0.4, "dur": 0.4, "gross": 0.03, "net": 0.01, "shares": 10}]
     s = arb_summarize(eps)
