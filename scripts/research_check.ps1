@@ -24,6 +24,7 @@ $sections = @(
     @("== C: lead-lag (pre-registered) ==",   "scripts/lead_lag_test.py --ticks data/tick_log_pulled.jsonl.gz"),
     @("== Collector health ==",                "scripts/health_check.py --dir data/l2_pulled/l2 --min-hours 12"),
     @("== T3 confirmation on executable L2 prices ==", "scripts/lead_lag_l2.py"),
+    @("== V: which venue leads Polymarket ==", 'scripts/venue_lead_test.py --l2 "data/l2_pulled/l2/l2_*.jsonl*"'),
     @("== Phase 1: arb scan ==",              "scripts/arb_scan.py --log data/l2_pulled/l2/arb_log.jsonl"),
     @("== Phase 2: maker replay ==",           'scripts/mm_replay.py --l2 "data/l2_pulled/l2/l2_*.jsonl*" --ticks data/tick_log_pulled.jsonl.gz'),
     @("== Phase 2 control: queue ignored ==", 'scripts/mm_replay.py --l2 "data/l2_pulled/l2/l2_*.jsonl*" --ticks data/tick_log_pulled.jsonl.gz --no-queue')
