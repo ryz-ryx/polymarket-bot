@@ -25,6 +25,7 @@ RECONCILIATION_MAX_AGE_SEC = 7200.0
 RESOLUTION_FALLBACK_TIMEOUT_SEC = 900.0
 TWAP_SETTLEMENT_WINDOW_SEC = 60.0
 ROLLUP_WINDOW_COUNT = 10
+HALT_REMINDER_SEC = 3600.0
 
 class AssetTradingEngine:
     def __init__(self, asset: str, shared_book_ws: PolymarketBookWS, strategy: Optional[ClaudQuantBinaryOptionStrategy] = None, initial_balance_usd: Optional[float] = None):
@@ -1303,6 +1304,7 @@ class Polymarket5mBot:
         self.starting_balance_usd = config.starting_balance_usd
         self.max_drawdown_floor_usd = self.starting_balance_usd * (1.0 - config.max_portfolio_drawdown_pct)
         self.drawdown_breaker_triggered = False
+        self._last_halt_reminder = time.time()
 
         self._load_portfolio_state()
         self._load_drawdown_state()
@@ -1502,10 +1504,25 @@ class Polymarket5mBot:
             await self.book_ws.stop()
             await notifier.close()
 
+    def _halt_reminder(self, now: Optional[float] = None) -> bool:
+        """Repeat an alert every HALT_REMINDER_SEC while a portfolio breaker is tripped, so a
+        halt cannot go unnoticed after the one-shot trip alert. Alert only: never changes
+        breaker state or trading. Returns True if a reminder was sent."""
+        now = time.time() if now is None else now
+        if not (self.drawdown_breaker_triggered or self.portfolio_circuit_breaker):
+            return False
+        if now - self._last_halt_reminder < HALT_REMINDER_SEC:
+            return False
+        self._last_halt_reminder = now
+        which = "PERMANENT drawdown breaker" if self.drawdown_breaker_triggered else "daily loss breaker"
+        notifier.alert(f"⚠️ STILL HALTED: {which} is tripped. No new trades are being taken. Manual review needed.")
+        return True
+
     async def _portfolio_risk_loop(self):
         while True:
             try:
                 self.check_portfolio_risk()
+                self._halt_reminder()
             except Exception as e:
                 logger.error(f"Error in portfolio risk monitor: {e}")
             await asyncio.sleep(1)
