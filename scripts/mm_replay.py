@@ -185,7 +185,10 @@ def main():
     adverse = sum(1 for r in rows if r["m30"] is not None and r["m30"] < 0) / max(mean_of(rows, "m30")[1], 1)
     print(f"optimistic rebate per share: {reb:+.4f}   adverse-selection share (30s markout<0): {adverse:.0%}")
     m30 = mean_of(rows, "m30")[0]
-    if n < 300 or m30 is None:
+    if args.no_queue:
+        print("CONTROL ONLY (queue ignored = optimistic upper bound, not a verdict). Per the pre-registration, an "
+              "edge that appears only without queue modelling is a KILL.")
+    elif n < 300 or m30 is None:
         print("VERDICT: INSUFFICIENT (need >= 300 fills)")
     else:
         print("VERDICT:", "KILL (mean 30s markout + rebate <= 0)" if m30 + reb <= 0 else "SURVIVES this test: go to shadow mode")
