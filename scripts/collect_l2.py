@@ -27,6 +27,7 @@ from aiohttp.resolver import AsyncResolver
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.mm.arb import ArbTracker  # noqa: E402
 from src.mm.book import LocalBook  # noqa: E402
+from src.mm.venues import VENUES, Throttle  # noqa: E402
 
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 GAMMA = "https://gamma-api.polymarket.com"
@@ -104,7 +105,7 @@ class Collector:
         self.subscribed = set()
         self.next_try = {}     # window_ts -> next gamma attempt time
         self.stats = {"events": {}, "reconnects": 0, "trades": 0, "snaps": 0, "arb_episodes": 0,
-                      "started": time.time(), "last_event_ts": None}
+                      "started": time.time(), "last_event_ts": None, "venue_rows": {}}
         self.ws = None
         self.arb_path = os.path.join(OUT_DIR, "arb_log.jsonl")
         self.stats_path = os.path.join(OUT_DIR, "collector_stats.json")
@@ -271,6 +272,7 @@ class Collector:
                 finally:
                     hk.cancel()
                     hb.cancel()
+                    print(f"collect_l2: polymarket socket ended code={ws.close_code}", flush=True)
                     self.ws = None
 
     @staticmethod
@@ -282,7 +284,44 @@ class Collector:
         except Exception:
             return
 
+    async def _venue_feed(self, name: str) -> None:
+        """Record throttled top-of-book quotes from one exchange as {"t":"x","v":name,...} rows, on the same
+        local receive clock as the Polymarket rows, so cross-venue lead-lag can be measured. Reconnects forever."""
+        cfg, throttle, delay = VENUES[name], Throttle(0.25), 3.0
+        while True:
+            started = time.time()
+            try:
+                connector = aiohttp.TCPConnector(resolver=AsyncResolver(nameservers=["1.1.1.1", "8.8.8.8"]))
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    async with session.ws_connect(cfg["url"], timeout=aiohttp.ClientWSTimeout(ws_receive=30, ws_close=10)) as ws:
+                        if cfg["sub"]:
+                            await ws.send_str(json.dumps(cfg["sub"]))
+                        async for msg in ws:
+                            if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                break
+                            if msg.type != aiohttp.WSMsgType.TEXT:
+                                continue
+                            try:
+                                q = cfg["parse"](json.loads(msg.data))
+                            except (json.JSONDecodeError, TypeError):
+                                continue
+                            if not q:
+                                continue
+                            now = time.time()
+                            if throttle.allow(now, q[0], q[1]):
+                                self.rec.write({"t": "x", "ts": round(now, 3), "v": name, "b": q[0], "a": q[1],
+                                                "st": None if q[2] is None else round(q[2], 3)})
+                                self.stats["venue_rows"][name] = self.stats["venue_rows"].get(name, 0) + 1
+                        print(f"collect_l2: {name} socket ended code={ws.close_code}", flush=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"collect_l2: {name} feed error: {type(e).__name__}: {e}", flush=True)
+            delay = 3.0 if time.time() - started > 60 else min(delay * 2, 60.0)
+            await asyncio.sleep(delay + random.uniform(0.1, 1.0))
+
     async def run(self) -> None:
+        self._venue_tasks = [asyncio.create_task(self._venue_feed(n)) for n in VENUES]
         fails = 0
         while True:
             t0 = time.time()
