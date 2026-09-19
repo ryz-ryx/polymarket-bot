@@ -216,6 +216,29 @@ API errors, or state mismatch. Kill: net negative after a pre-set number of fill
 **Skip:** colocation and latency racing (competitors reportedly under 100ms), further dashboards, ETH/SOL expansion,
 tuning the frozen bot, copy-trading wallets, running any third-party bot repository.
 
+## 5b. Progress log (Phase 0 and 1, 2026-09-19)
+
+Done: resolution module (`src/resolution.py`, reproduces 96.6% of real outcomes); collector health check
+(`scripts/health_check.py`); multi-venue latency probe (`scripts/latency_probe.py`); collector now also records
+throttled Binance/Coinbase/Kraken top-of-book rows (`"t":"x"`) on the same receive clock and logs socket close
+codes (the Polymarket socket closes cleanly about every 16 minutes with no error; benign, no gap over 60s).
+
+Latency from the Amsterdam host (p50 REST round trip): Polymarket CLOB 18ms, Kraken 42ms, Coinbase 123ms,
+Bybit 174ms, Binance 225ms, OKX 265ms. Whether a nearer venue leads Polymarket is a question for the new `"x"` rows.
+
+Test ledger so far (each pre-registered, verdicts on sealed holdouts): A shrink-to-market KILL; B price buckets KILL;
+C lead-lag on bot cache: lag exists, tradable version negative (77 trades, -16.7%/$, CI [-31%, -3%]); T1 wallet
+persistence KILL; T2 maker upper bound KILL; T3 tape lead-lag PASS but fragile (dies at 3c slippage or 4s delay);
+arb scan KILL (577 zero-duration episodes: artifacts of separately updating books); maker replay with queue model
+-2.6c/share over 270 fills (insufficient count, wrong direction), queue-ignored control about +0.2c (a pre-registered
+KILL condition); **S corrected-strike model vs market KILL** (holdout Brier: market 0.0905, correct-convention model
+0.0889, old point-strike model 0.1147; blend-minus-market -0.0008, CI [-0.0019, +0.0003]).
+
+Reading: the old strike convention explains why the model looked worse than the market in earlier audits; with the
+correct rule the model only reaches parity with the market and adds nothing beyond it. The remaining open candidate
+is lead-lag on executable prices (`scripts/lead_lag_l2.py`, currently n=30 of 200 needed, point estimates about 0 at
+1s, negative at 2s and significantly negative at 4s).
+
 ## 6. Decisions needed from the user
 1. Physical jurisdiction and eligibility (blocking for any live step).
 2. Time and cost budget (hosting, gas, data, hours) versus expected return; who reviews the results independently.
