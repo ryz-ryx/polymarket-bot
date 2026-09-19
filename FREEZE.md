@@ -39,3 +39,4 @@ Adds a way to end the test EARLY if it is clearly losing. It cannot produce an e
 
 ## Bug-fix log
 - 2026-09-18: added observation-only `_log_book_depth` in `src/bot.py`. Appends the top-5 ask ladder (before and after the simulated latency re-fetch) to `data/book_depth_log.jsonl` at signal time. Best-effort, never raises, no input to any decision, sizing or filter. Tests in `tests/test_book_depth_log.py`. Also: `scripts/random_baseline.py` now takes the freeze start from the commit that added FREEZE.md, so editing this log does not move it; added `scripts/daily_scorecard.py`.
+- 2026-09-19: added observation-only `_log_tick` in `src/bot.py`. Appends one row per tick (spot, strike, top-of-book yes/no bid/ask) to `data/tick_log.jsonl` right after `log_observation`, for offline spot-vs-book lead-lag analysis. Best-effort, never raises, no input to any decision, sizing or filter. Tests in `tests/test_tick_log.py`.

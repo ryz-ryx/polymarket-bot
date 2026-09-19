@@ -33,9 +33,10 @@ def load_fills(url: str, path: str):
     if path:
         with open(path, "r", encoding="utf-8") as f:
             text = f.read().strip()
-        if text.startswith("{"):
-            return json.loads(text)["fills"]
-        return [json.loads(line) for line in text.splitlines() if line.strip()]
+        try:
+            return json.loads(text)["fills"]  # saved /api/fills response
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return [json.loads(line) for line in text.splitlines() if line.strip()]  # raw jsonl
     with urllib.request.urlopen(f"{url.rstrip('/')}/api/fills?limit=100000", timeout=30) as r:
         return json.load(r)["fills"]
 

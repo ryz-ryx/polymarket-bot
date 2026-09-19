@@ -187,6 +187,7 @@ class AssetTradingEngine:
         self.resolutions_file = f"data/pending_resolutions{file_suffix}.json"
         self.oracle_log_path = f"data/oracle_divergence{file_suffix}.csv"
         self.book_depth_log_path = f"data/book_depth_log{file_suffix}.jsonl"
+        self.tick_log_path = f"data/tick_log{file_suffix}.jsonl"
         self.pending_resolutions: List[Dict[str, Any]] = []
         self._load_pending_resolutions()
 
@@ -268,6 +269,22 @@ class AssetTradingEngine:
                 }) + "\n")
         except Exception as e:
             logger.warning(f"book depth log write failed: {type(e).__name__}: {e}")
+
+    def _log_tick(self, spot_price: float, quotes: Dict[str, Any]) -> None:
+        """Append one aligned (Binance spot, Polymarket top-of-book) row per tick so
+        spot-vs-book lead-lag can be measured offline. Observation only: best-effort,
+        never raises, never feeds a decision."""
+        try:
+            os.makedirs(os.path.dirname(self.tick_log_path), exist_ok=True)
+            with open(self.tick_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "ts": time.time(), "asset": self.asset, "window_id": self.current_window_id,
+                    "spot": spot_price, "strike": self.strike_price,
+                    "yes_bid": quotes.get("yes_bid"), "yes_ask": quotes.get("yes_ask"),
+                    "no_bid": quotes.get("no_bid"), "no_ask": quotes.get("no_ask"),
+                }) + "\n")
+        except Exception as e:
+            logger.warning(f"tick log write failed: {type(e).__name__}: {e}")
 
     async def _poll_deferred_resolutions(self):
         now = time.time()
@@ -818,6 +835,7 @@ class AssetTradingEngine:
             book_depth_skew=book_depth_skew,
             momentum_normalized=norm_momentum
         )
+        self._log_tick(spot_price, live_quotes)
 
         market_info = {
             "strike_price": self.strike_price,
