@@ -32,6 +32,14 @@ Adds a way to end the test EARLY if it is clearly losing. It cannot produce an e
 - Checked by `scripts/daily_scorecard.py` (prints the check when n reaches a look).
 - Pre-freeze evidence, for the record: 28 trades, average entry 0.485, win rate 42.9% (break-even before fees is about 48.5%), gross -$2.74, fees $1.40. Fees explain about a third of the loss; gross is negative on its own. Beats 31.6% of random-side sims; 95% CI of net PnL/staked is [-53%, +35%], i.e. uninformative at n=28.
 
+## Amendment: clock restart (written 2026-09-19 ~08:35 UTC, before any post-restart trade had settled)
+The test never actually ran. The portfolio drawdown breaker tripped 2026-09-18 16:21 UTC, before the futility amendment above, and halted all trading until 2026-09-19 08:28 UTC. Zero post-freeze trades settled in that time (last fill 16:15 UTC on 09-18).
+- Cause: config mismatch, not real losses. `TARGET_ASSETS=BTC,ETH,SOL` is filtered to BTC by `proven_assets`, so one engine exists and holds a ~$25 slice, but `STARTING_BALANCE_USD=75` put the floor at $56.25. The breaker sums existing engines' cash ($20.86 = $25 - the $4.14 baseline loss) and tripped immediately.
+- Fix, config/state only, no code: cleared the tripped flag in `data/risk_state_drawdown.json` (original kept as `data/risk_state_drawdown.tripped_20260918.json` on the volume) and set `STARTING_BALANCE_USD=25` on Railway. Floor is now $18.75 on $25.
+- The 14-day clock restarts at the 2026-09-19 08:28 UTC redeploy. New dates: freeze to 2026-10-03, max 2026-10-17. Pass rule, kill rule and futility looks are unchanged (60/100/150 post-freeze BTC trades).
+- Trade counting is unaffected: no trade settled between the original freeze commit and the restart, so scripts that anchor on the FREEZE.md commit time still count exactly the post-restart trades.
+- Consequence to watch: the $18.75 floor leaves about $2.11 of headroom over $20.86 cash. The breaker can trip again after a short losing run and needs a manual clear. If it does, that is the pre-registered capital-preservation rule working, and it goes in the bug-fix log.
+
 ## Known open items (not fixed, by design)
 - `daily_pnl` and the drawdown breakers use payout - cost without the buy fee, so they run slightly optimistic. Fixing it changes live risk behavior, so it waits until after the test.
 - Paper fills assume the quoted ask. Real order-book depth is not logged at signal time.
@@ -40,3 +48,5 @@ Adds a way to end the test EARLY if it is clearly losing. It cannot produce an e
 ## Bug-fix log
 - 2026-09-18: added observation-only `_log_book_depth` in `src/bot.py`. Appends the top-5 ask ladder (before and after the simulated latency re-fetch) to `data/book_depth_log.jsonl` at signal time. Best-effort, never raises, no input to any decision, sizing or filter. Tests in `tests/test_book_depth_log.py`. Also: `scripts/random_baseline.py` now takes the freeze start from the commit that added FREEZE.md, so editing this log does not move it; added `scripts/daily_scorecard.py`.
 - 2026-09-19: added observation-only `_log_tick` in `src/bot.py`. Appends one row per tick (spot, strike, top-of-book yes/no bid/ask) to `data/tick_log.jsonl` right after `log_observation`, for offline spot-vs-book lead-lag analysis. Best-effort, never raises, no input to any decision, sizing or filter. Tests in `tests/test_tick_log.py`.
+- 2026-09-19: `scripts/random_baseline.py` `load_fills` now accepts raw jsonl as well as a saved API response (analysis script, no trading effect). Added `scripts/offline_replay.py` (analysis only).
+- 2026-09-19 08:28 UTC: cleared the tripped drawdown breaker and set `STARTING_BALANCE_USD=25` on Railway. See the clock-restart amendment above. Config/state change, not a code change.
