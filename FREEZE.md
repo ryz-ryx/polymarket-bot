@@ -57,6 +57,15 @@ Cash had fallen to $19.43 against the $18.75 floor ($0.68 headroom) after 1 post
 - Paper fills assume the quoted ask. Real order-book depth is not logged at signal time.
   (Correction 2026-09-18: paper fills are priced at the walked VWAP after a simulated latency re-fetch of the book, `bot.py` ~L1060-1073. What was not logged was the ladder itself; see bug-fix log.)
 
+- Settlement convention (found 2026-09-19, NOT fixed, by design): live rules resolve on Chainlink's 60s TWAP at both
+  ends. Over 672 real windows a 60s/60s rule reproduces 96.6% of outcomes from Binance data, but the bot's convention
+  (TWAP at expiry vs a point-price strike `K`) reproduces only 90.2% (76.9% in windows that end within 3 bps of the
+  strike). Fixing it changes live model behavior, so it waits until after the test. `src/resolution.py` holds the
+  measured rule for analysis. See `docs/research_and_plan_2026-09-19.md`.
+- Hosting eligibility (found 2026-09-19): Polymarket's geoblock endpoint returns `blocked: true` for the Railway
+  egress IP (Amsterdam, NL). Paper trading and data reads are unaffected; any order placement from this host would be
+  rejected. Blocking for any live step; needs the owner's jurisdiction and a permitted host (no VPN workaround).
+
 ## Bug-fix log
 - 2026-09-18: added observation-only `_log_book_depth` in `src/bot.py`. Appends the top-5 ask ladder (before and after the simulated latency re-fetch) to `data/book_depth_log.jsonl` at signal time. Best-effort, never raises, no input to any decision, sizing or filter. Tests in `tests/test_book_depth_log.py`. Also: `scripts/random_baseline.py` now takes the freeze start from the commit that added FREEZE.md, so editing this log does not move it; added `scripts/daily_scorecard.py`.
 - 2026-09-19: added observation-only `_log_tick` in `src/bot.py`. Appends one row per tick (spot, strike, top-of-book yes/no bid/ask) to `data/tick_log.jsonl` right after `log_observation`, for offline spot-vs-book lead-lag analysis. Best-effort, never raises, no input to any decision, sizing or filter. Tests in `tests/test_tick_log.py`.
