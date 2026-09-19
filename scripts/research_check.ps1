@@ -22,6 +22,7 @@ tar -xzf data/l2_pulled/l2.tar.gz -C data/l2_pulled
 $report = "data/research_check_$(Get-Date -Format yyyyMMdd).txt"
 $sections = @(
     @("== C: lead-lag (pre-registered) ==",   "scripts/lead_lag_test.py --ticks data/tick_log_pulled.jsonl.gz"),
+    @("== T3 confirmation on executable L2 prices ==", "scripts/lead_lag_l2.py"),
     @("== Phase 1: arb scan ==",              "scripts/arb_scan.py --log data/l2_pulled/l2/arb_log.jsonl"),
     @("== Phase 2: maker replay ==",           'scripts/mm_replay.py --l2 "data/l2_pulled/l2/l2_*.jsonl*" --ticks data/tick_log_pulled.jsonl.gz'),
     @("== Phase 2 control: queue ignored ==", 'scripts/mm_replay.py --l2 "data/l2_pulled/l2/l2_*.jsonl*" --ticks data/tick_log_pulled.jsonl.gz --no-queue')
