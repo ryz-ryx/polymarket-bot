@@ -6,8 +6,11 @@ Local/Windows use is unaffected -- run.py is untouched, and dashboard.py can
 still be run standalone if you want the dashboard without the bot.
 """
 import asyncio
+import os
+import subprocess
 import sys
 import threading
+import time
 
 from loguru import logger
 
@@ -17,6 +20,21 @@ from src import notifier
 from src import chat_bot
 from src.reset_state import reset_all_state_if_requested
 from config import config
+
+def _supervise_l2_collector():
+    """Observation-only order-book collector (scripts/collect_l2.py) as an isolated child
+    process: a crash or hang there cannot touch the bot. Restarts with backoff. Disable with
+    RUN_L2_COLLECTOR=0."""
+    delay = 5.0
+    while True:
+        started = time.time()
+        try:
+            subprocess.Popen([sys.executable, "scripts/collect_l2.py"]).wait()
+        except Exception as e:
+            logger.warning(f"L2 collector supervisor: {type(e).__name__}: {e}")
+        delay = 5.0 if time.time() - started > 120 else min(delay * 2, 300.0)
+        time.sleep(delay)
+
 
 if __name__ == "__main__":
     try:
@@ -41,6 +59,9 @@ if __name__ == "__main__":
     # src/chat_bot.py. A no-op if TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are unset.
     chat_thread = threading.Thread(target=chat_bot.run, daemon=True)
     chat_thread.start()
+
+    if os.getenv("RUN_L2_COLLECTOR", "1") != "0":
+        threading.Thread(target=_supervise_l2_collector, daemon=True).start()
 
     bot = Polymarket5mBot()
     try:
