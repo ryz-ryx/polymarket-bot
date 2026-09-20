@@ -39,6 +39,7 @@ and want an independent, evidence-based read on it.
 
 ## Proof of work
 
+Sample audit report: `docs/sample_audit_report.md`.
 Public case study: `docs/case_study_no_edge.md`, a full pre-registered falsification of my own bot, including the
 results that disappointed me.
 
