@@ -21,6 +21,8 @@ SIDE_COST = 0.0012
 SIZE_FRAC = 0.45
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 URL = "https://data-api.binance.vision/api/v3/klines?symbol={s}&interval=1m&limit=1000"
+BARS_NEEDED = 1601  # signals() needs a 1440-minute volatility window plus 15-minute return
+PAGES = 2  # 1000 bars per request
 
 
 def new_state(cash=50.0):
@@ -42,8 +44,8 @@ def step(state, sym, bars):
         state["closed_pnl"] += pnl
         events.append({"ts": now_ts, "sym": sym, "action": "exit", "rule": p["rule"], "px": now_px, "pnl": round(pnl, 4)})
         del state["pos"][sym]
-    if sym not in state["pos"] and len(closed) > 1600:
-        c = closed[-1601:, 2]
+    if sym not in state["pos"] and len(closed) >= BARS_NEEDED:
+        c = closed[-BARS_NEEDED:, 2]
         for name, (kind, hold) in RULES.items():
             if signals(kind, c)[-1]:
                 equity = state["cash"] + sum(q["qty"] * now_px for q in state["pos"].values())
@@ -63,8 +65,13 @@ def step(state, sym, bars):
 
 
 def fetch(sym):
-    with urllib.request.urlopen(URL.format(s=sym), timeout=20) as r:
-        return np.array([[int(b[0]), float(b[1]), float(b[4])] for b in json.loads(r.read())])
+    rows, end = [], ""
+    for _ in range(PAGES):
+        with urllib.request.urlopen(URL.format(s=sym) + end, timeout=20) as r:
+            page = json.loads(r.read())
+        rows = page + rows
+        end = f"&endTime={int(page[0][0]) - 1}"
+    return np.array([[int(b[0]), float(b[1]), float(b[4])] for b in rows])
 
 
 def main(minutes=55):

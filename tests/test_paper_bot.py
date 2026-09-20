@@ -41,3 +41,7 @@ def test_position_size_respects_cap():
     st = pb.new_state()
     pb.step(st, "BTCUSDT", _bars())
     assert st["cash"] >= 50.0 * (1 - pb.SIZE_FRAC) - 0.5
+
+
+def test_fetch_covers_bars_needed():
+    assert pb.PAGES * 1000 > pb.BARS_NEEDED  # regression: 1000 bars once made the bot unable to ever trade
