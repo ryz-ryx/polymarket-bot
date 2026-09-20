@@ -74,6 +74,16 @@ def fetch(sym):
     return np.array([[int(b[0]), float(b[1]), float(b[4])] for b in rows])
 
 
+def heartbeat(state, sym, bars):
+    """One human-readable status line: price, what each rule sees right now, account."""
+    c = bars[:-1, 2]
+    flags = " ".join(f"{n[:2]}={'FIRE' if signals(k, c[-BARS_NEEDED:])[-1] else '-'}" for n, (k, h) in RULES.items())
+    equity = state["cash"] + sum(q["qty"] * bars[-1, 1] for q in state["pos"].values())
+    pos = state["pos"].get(sym, {}).get("rule", "flat")
+    return (f"{time.strftime('%H:%M:%S')} {sym} px={bars[-1, 1]:.2f} rules[{flags}] pos={pos} "
+            f"cash={state['cash']:.2f} equity={equity:.2f} trades={state['trades']} fees={state['fees']:.3f}")
+
+
 def main(minutes=55):
     OUT.mkdir(parents=True, exist_ok=True)
     sp = OUT / "state.json"
@@ -82,7 +92,9 @@ def main(minutes=55):
     while time.time() < end:
         for sym in SYMBOLS:
             try:
-                ev = step(state, sym, fetch(sym))
+                bars = fetch(sym)
+                ev = step(state, sym, bars)
+                print(heartbeat(state, sym, bars), flush=True)
             except Exception as e:  # network hiccup: log and continue
                 ev = [{"action": "error", "sym": sym, "msg": str(e)[:100]}]
             with open(OUT / "log.jsonl", "a") as f:
