@@ -2,13 +2,14 @@
 # Railway container in chunks and stored locally as data/trades/chunk_<first_window>.csv.gz. Resumable
 # (existing chunk files are skipped). Read-only on Railway. Run from the repo root:
 #   powershell -NoProfile -File scripts\dl_driver.ps1 [-Days 14] [-Chunk 6]
-param([int]$Days = 14, [int]$Chunk = 6, [int]$Seed = 42, [int]$PerHour = 2, [string]$OutDir = "data/trades")
+param([int]$Days = 14, [int]$Chunk = 6, [int]$Seed = 42, [int]$PerHour = 2, [string]$OutDir = "data/trades", [long]$EndAt = 0)
 $ErrorActionPreference = "Continue"
 $env:Path += ";" + (npm prefix -g).Trim()
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
 $now = [int][double]::Parse((Get-Date -UFormat %s))
 $end = ([int]([math]::Floor($now / 3600)) - 2) * 3600          # skip the last 2h: not finalized
+if ($EndAt -gt 0) { $end = $EndAt }                             # pin the anchor so a restart resumes the same sample
 $rng = New-Object System.Random $Seed                           # fixed seed: same sample every run
 $windows = @()
 for ($h = $end - $Days * 86400; $h -lt $end; $h += 3600) {
