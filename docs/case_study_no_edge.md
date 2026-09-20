@@ -32,6 +32,7 @@ Nothing here is trading or investment advice. No live trading was done; the bot 
 | Lead-lag on executable order-book prices | Killed | n=126 at 2s delay, mean -1.1%/$, -5.5%/$ with 1c slippage; needed n >= 200 and a CI above zero |
 | Taker entry one tick late, exit after 10s | Killed | n=179, -9.1%/$ after fees, CI fully below zero |
 | Late-window locked-in TWAP (test L) | Unresolved | Needed a fresh sample that became unavailable; 15 holdout trades had a CI including zero |
+| Daily SMA(50) trend on BTC/ETH spot, 0.8% fee (test T) | Killed | Holdout 1,328 days: pooled alpha +8.4%/yr, CI [-15.4%, +33.7%]; BTC Sharpe 0.80 vs buy-and-hold 0.98 |
 
 ## What I learned
 
