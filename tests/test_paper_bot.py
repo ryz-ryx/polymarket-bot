@@ -7,41 +7,55 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import paper_bot as pb  # noqa: E402
 
 
-def _bars(n=1800, spike=True, seed=1):
+def _closes(n=1800, spike=True, seed=1):
     rng = np.random.default_rng(seed)
     px = 100 * np.exp(np.cumsum(rng.normal(0, 0.0003, n)))
     if spike:
-        px[-2] *= 1.02  # last closed bar: large 15-min jump -> momentum signal
-    ts = 1_800_000_000_000 + np.arange(n) * 60_000
-    return np.column_stack([ts, px, px])
+        px[-1] *= 1.02  # last closed bar: large 15-minute jump -> momentum signal
+    return list(px)
 
 
 def test_no_signal_no_trade():
     st = pb.new_state()
-    ev = pb.step(st, "BTCUSDT", _bars(spike=False))
+    ev = pb.on_bar_close(st, "BTCUSDT", _closes(spike=False), 100.0, 1_000)
     assert ev == [] and st["cash"] == 50.0 and st["trades"] == 0
 
 
-def test_enter_then_exit_charges_fees_both_sides():
+def test_enter_at_ask_exit_at_bid_charges_fees_and_spread():
     st = pb.new_state()
-    bars = _bars()
-    ev = pb.step(st, "BTCUSDT", bars)
-    assert ev and ev[0]["action"] == "enter" and st["fees"] > 0
-    equity_after_entry = st["cash"] + st["pos"]["BTCUSDT"]["qty"] * bars[-1, 1]
-    assert equity_after_entry < 50.0  # entry fee already paid
-    later = bars.copy()
-    later[:, 0] += 61 * 60_000  # jump past the hold window at the same price
-    later[-2, 1:] = later[-2, 1] / 1.02  # remove spike so no immediate re-entry signal
-    ev2 = pb.step(st, "BTCUSDT", later)
-    assert any(e["action"] == "exit" for e in ev2)
-    assert st["closed_pnl"] < 0  # flat price: only fees lost
+    ev = pb.on_bar_close(st, "BTCUSDT", _closes(), 100.02, 1_000)  # ask above bid: spread is a real cost
+    assert ev and ev[0]["action"] == "enter" and ev[0]["px"] == 100.02 and st["fees"] > 0
+    assert pb.on_tick(st, "BTCUSDT", 99.99, 100.01, 2_000) == []  # hold not over yet
+    hold = st["pos"]["BTCUSDT"]["exit_ts"]
+    out = pb.on_tick(st, "BTCUSDT", 100.00, 100.02, hold)  # bid 100.00 < entry ask 100.02
+    assert out and out[0]["action"] == "exit" and "BTCUSDT" not in st["pos"]
+    assert st["closed_pnl"] < 0  # flat mid price: fees and spread lost
+    assert st["cash"] < 50.0
 
 
 def test_position_size_respects_cap():
     st = pb.new_state()
-    pb.step(st, "BTCUSDT", _bars())
+    pb.on_bar_close(st, "BTCUSDT", _closes(), 100.0, 1_000)
     assert st["cash"] >= 50.0 * (1 - pb.SIZE_FRAC) - 0.5
 
 
-def test_fetch_covers_bars_needed():
+def test_needs_enough_closed_bars():
+    st = pb.new_state()
+    assert pb.on_bar_close(st, "BTCUSDT", _closes()[-500:], 100.0, 1_000) == []  # fewer than BARS_NEEDED
     assert pb.PAGES * 1000 > pb.BARS_NEEDED  # regression: 1000 bars once made the bot unable to ever trade
+
+
+def test_equity_values_each_position_at_its_own_price():
+    st = pb.new_state()
+    st["cash"] = 10.0
+    st["pos"]["BTCUSDT"] = {"rule": "R3_breakout", "qty": 0.5, "cost_basis": 50.0, "exit_ts": 0}
+    st["mark"] = {"BTCUSDT": 100.0, "ETHUSDT": 2.0}
+    assert abs(pb.equity(st) - 60.0) < 1e-9  # 10 cash + 0.5 * BTC price, not the ETH price
+
+
+def test_second_coin_signal_uses_own_position_only():
+    st = pb.new_state()
+    pb.on_bar_close(st, "BTCUSDT", _closes(), 100.0, 1_000)
+    pb.on_bar_close(st, "ETHUSDT", _closes(seed=2), 50.0, 1_000)
+    assert set(st["pos"]) == {"BTCUSDT", "ETHUSDT"}
+    assert st["cash"] >= 0
