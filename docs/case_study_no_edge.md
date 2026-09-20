@@ -32,6 +32,7 @@ Nothing here is trading or investment advice. No live trading was done; the bot 
 | Lead-lag on executable order-book prices | Killed | n=126 at 2s delay, mean -1.1%/$, -5.5%/$ with 1c slippage; needed n >= 200 and a CI above zero |
 | Taker entry one tick late, exit after 10s | Killed | n=179, -9.1%/$ after fees, CI fully below zero |
 | Fast 1-minute rules on BTC/ETH spot, 3 rules x 5 holds (test F) | Killed | 482k bars per coin; net -0.25%/trade at 0.24% cost, CI below zero; zero-fee gross edge -6.5 to +3.2 bps vs 12-24 bps cost |
+| Cross-sectional daily rules across 20 coins (test X) | Killed | Dev 1,020 days: excess vs equal-weight -6 to -27 bps/day after 0.12%/side; holdout not opened |
 | Late-window locked-in TWAP (test L) | Unresolved | Needed a fresh sample that became unavailable; 15 holdout trades had a CI including zero |
 | Daily SMA(50) trend on BTC/ETH spot, 0.8% fee (test T) | Killed | Holdout 1,328 days: pooled alpha +8.4%/yr, CI [-15.4%, +33.7%]; BTC Sharpe 0.80 vs buy-and-hold 0.98 |
 
