@@ -48,7 +48,15 @@ def equity(state):
                                for sym, q in state["pos"].items())
 
 
-def enter(state, sym, rule, hold, ask, ts):
+def stop_reason(state, prereg):
+    """Pre-registered stop rule (docs/paper_prereg.json). Returns a reason string or None."""
+    eq = equity(state)
+    if eq <= prereg["stop_equity"]:
+        return f"equity {eq:.2f} <= stop {prereg['stop_equity']}"
+    return None
+
+
+def enter(state, sym, rule, hold, ask, ts, mid=None):
     if sym in state["pos"]:
         return None
     notional = min(state["cash"] / (1 + FEE), equity(state) * SIZE_FRAC)
@@ -58,12 +66,13 @@ def enter(state, sym, rule, hold, ask, ts):
     state["cash"] -= notional + fee
     state["fees"] += fee
     state["trades"] += 1
+    mid = ask if mid is None else mid
     state["pos"][sym] = {"rule": rule, "qty": notional / ask, "cost_basis": notional + fee,
-                         "exit_ts": ts + hold * 60_000}
+                         "exit_ts": ts + hold * 60_000, "mid_in": mid, "fee_in": fee}
     return {"ts": ts, "sym": sym, "action": "enter", "rule": rule, "px": ask, "notional": round(notional, 2)}
 
 
-def exit_pos(state, sym, bid, ts):
+def exit_pos(state, sym, bid, ts, mid=None):
     p = state["pos"].pop(sym)
     gross = p["qty"] * bid
     fee = gross * FEE
@@ -71,7 +80,11 @@ def exit_pos(state, sym, bid, ts):
     state["fees"] += fee
     pnl = gross - fee - p["cost_basis"]
     state["closed_pnl"] += pnl
-    return {"ts": ts, "sym": sym, "action": "exit", "rule": p["rule"], "px": bid, "pnl": round(pnl, 4)}
+    ev = {"ts": ts, "sym": sym, "action": "exit", "rule": p["rule"], "px": bid, "pnl": round(pnl, 4)}
+    if "mid_in" in p:  # lets the report split P&L into signal (mid to mid), spread and fees
+        ev.update(mid_in=p["mid_in"], mid_out=bid if mid is None else mid, qty=p["qty"],
+                  fee_in=p["fee_in"], fee_out=fee)
+    return ev
 
 
 def on_tick(state, sym, bid, ask, ts):
@@ -79,18 +92,18 @@ def on_tick(state, sym, bid, ask, ts):
     state.setdefault("mark", {})[sym] = (bid + ask) / 2
     p = state["pos"].get(sym)
     if p and ts >= p["exit_ts"]:
-        return [exit_pos(state, sym, bid, ts)]
+        return [exit_pos(state, sym, bid, ts, mid=(bid + ask) / 2)]
     return []
 
 
-def on_bar_close(state, sym, closes, ask, ts):
+def on_bar_close(state, sym, closes, ask, ts, bid=None):
     """A 1-minute bar just closed: evaluate the rules on closed bars and enter at the ask if one fires."""
     if sym in state["pos"] or len(closes) < BARS_NEEDED:
         return []
     c = np.asarray(closes, float)[-BARS_NEEDED:]
     for name, (kind, hold) in RULES.items():
         if signals(kind, c)[-1]:
-            ev = enter(state, sym, name, hold, ask, ts)
+            ev = enter(state, sym, name, hold, ask, ts, mid=None if bid is None else (bid + ask) / 2)
             return [ev] if ev else []
     return []
 
@@ -164,7 +177,8 @@ async def consume(state, quotes, closes, last_t, end_time):
                             last_t[s] = int(k["t"])
                             closes[s].append(float(k["c"]))
                             if s in quotes:
-                                for ev in on_bar_close(state, s, closes[s], quotes[s][1], int(time.time() * 1000)):
+                                for ev in on_bar_close(state, s, closes[s], quotes[s][1], int(time.time() * 1000),
+                                                 bid=quotes[s][0]):
                                     log_event(ev)
                     else:
                         quotes[d["s"]] = (float(d["b"]), float(d["a"]))
@@ -173,13 +187,18 @@ async def consume(state, quotes, closes, last_t, end_time):
             await asyncio.sleep(3)
 
 
-async def ticker(state, quotes, end_time):
+async def ticker(state, quotes, end_time, prereg):
     writer = TickWriter()
     last_save = last_beat = 0.0
     live = open(OUT / "live.log", "a", buffering=1)
     try:
         while time.time() < end_time:
             now = time.time()
+            why = stop_reason(state, prereg)
+            if why:  # pre-registered stop: halt and say why
+                log_event({"action": "stop", "msg": why, "ts": int(now * 1000)})
+                live.write(f"STOPPED by pre-registered rule: {why}\n")
+                break
             ts = int(now * 1000)
             for s, (bid, ask) in list(quotes.items()):
                 for ev in on_tick(state, s, bid, ask, ts):
@@ -210,8 +229,12 @@ async def run(minutes):
     state = json.loads(sp.read_text()) if sp.exists() else new_state()
     state.setdefault("mark", {})
     quotes, closes, last_t = {}, {s: deque(maxlen=BARS_NEEDED + 50) for s in SYMBOLS}, {}
-    end_time = time.time() + minutes * 60
-    await asyncio.gather(consume(state, quotes, closes, last_t, end_time), ticker(state, quotes, end_time))
+    prereg = json.loads((ROOT / "docs" / "paper_prereg.json").read_text())
+    end_time = time.time() + min(minutes, prereg["max_runtime_days"] * 1440) * 60
+    tick = asyncio.ensure_future(ticker(state, quotes, end_time, prereg))
+    cons = asyncio.ensure_future(consume(state, quotes, closes, last_t, end_time))
+    await tick  # the ticker ends on stop or time; then end the websocket consumer too
+    cons.cancel()
     print(json.dumps({k: (round(v, 4) if isinstance(v, float) else v) for k, v in state.items() if k not in ("pos", "mark")}))
 
 

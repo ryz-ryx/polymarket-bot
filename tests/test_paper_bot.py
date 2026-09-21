@@ -53,6 +53,25 @@ def test_equity_values_each_position_at_its_own_price():
     assert abs(pb.equity(st) - 60.0) < 1e-9  # 10 cash + 0.5 * BTC price, not the ETH price
 
 
+def test_stop_rule_halts_at_stop_equity():
+    st = pb.new_state()
+    prereg = {"stop_equity": 40.0}
+    assert pb.stop_reason(st, prereg) is None
+    st["cash"] = 39.0
+    assert "stop" in pb.stop_reason(st, prereg)
+
+
+def test_cost_split_adds_up_to_net_pnl():
+    import paper_report as pr
+    st = pb.new_state()
+    pb.on_bar_close(st, "BTCUSDT", _closes(), 100.02, 1_000, bid=100.00)
+    hold = st["pos"]["BTCUSDT"]["exit_ts"]
+    ev = pb.on_tick(st, "BTCUSDT", 100.20, 100.22, hold)[0]
+    n, gross, spread, fees, net = next(iter(pr.cost_split([ev]).values()))
+    assert abs(gross - spread - fees - net) < 1e-9 and spread > 0 and fees > 0
+    assert abs(net - st["closed_pnl"]) < 1e-3
+
+
 def test_second_coin_signal_uses_own_position_only():
     st = pb.new_state()
     pb.on_bar_close(st, "BTCUSDT", _closes(), 100.0, 1_000)
