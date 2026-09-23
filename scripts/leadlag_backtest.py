@@ -76,10 +76,18 @@ def cluster_ci(tr, seed=5):
     return [round(float(v), 5) for v in np.percentile(means, [0.4, 99.6])], round(float(r.mean()), 5), len(r)
 
 
+WIDE_ALTS = ["ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "LTCUSDT", "POLUSDT",
+             "TRXUSDT", "ATOMUSDT", "NEARUSDT"]  # test L2, docs/PREREG_leadlag_wide.md (MATICUSDT -> POLUSDT, see amendment)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--holdout", action="store_true")
+    ap.add_argument("--wide", action="store_true", help="test L2: run the 10-alt universe instead of the original 3")
     a = ap.parse_args()
+    global ALTS
+    if a.wide:
+        ALTS = WIDE_ALTS
     btc = load("BTCUSDT")
     if a.holdout:
         if LOCK.exists():
