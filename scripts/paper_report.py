@@ -68,6 +68,21 @@ def cost_split(exits):
     return rows
 
 
+def daily_summary(state, trades, prereg):
+    """One plain-language paragraph: net P&L, how much of it is fees, and the honest verdict."""
+    pnl = state["closed_pnl"]
+    fee_share = min(abs(state["fees"] / pnl), 1.0) * 100 if pnl else (100.0 if state["fees"] else 0.0)
+    n = len(trades)
+    verb = "Lost" if pnl < 0 else "Made"
+    line1 = f"{verb} ${abs(pnl):.2f} so far, of which ${state['fees']:.2f} ({fee_share:.0f}%) was fees, over {n} closed trade{'s' if n != 1 else ''}."
+    if n < prereg["min_closed_trades"]:
+        line2 = f"Verdict: not enough trades yet to say if this works ({n}/{prereg['min_closed_trades']})."
+    else:
+        v, why = verdict([t["pnl"] for t in trades], pb_equity(state), prereg)
+        line2 = f"Verdict: {v} - {why}"
+    return f"SUMMARY: {line1} {line2}"
+
+
 def main():
     state = json.loads((OUT / "state.json").read_text())
     events = [json.loads(line) for line in (OUT / "log.jsonl").read_text().splitlines() if line.strip()]
@@ -85,8 +100,8 @@ def main():
         print()
     print(f"errors logged: {len(errors)}", [e["msg"] for e in errors][:3])
     prereg = json.loads((OUT.parent.parent / "docs" / "paper_prereg.json").read_text())
-    from paper_bot import equity as _eq  # noqa: E402
-    v, why = verdict([t["pnl"] for t in trades], _eq(state), prereg)
+    from paper_bot import equity as pb_equity  # noqa: E402
+    v, why = verdict([t["pnl"] for t in trades], pb_equity(state), prereg)
     print(f"PAPER ONLY (fills at real bid/ask, no queue or latency modelling: real results would be worse)")
     print(f"VERDICT: {v} - {why}")
     split = cost_split(trades)
@@ -96,6 +111,7 @@ def main():
             print(f"  {rule}: {n} | {g:+.4f} | -{s:.4f} | -{f:.4f} | {net:+.4f}")
     else:
         print("cost split: no closed trades with mid prices logged yet (older trades lack them)")
+    print(daily_summary(state, trades, prereg))
     if ticks:
         eqs = [t[4] for t in ticks]
         print(f"ticks: {len(ticks)} rows, equity min={min(eqs):.3f} max={max(eqs):.3f} last={eqs[-1]:.3f}")
