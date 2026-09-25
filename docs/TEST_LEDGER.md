@@ -22,9 +22,10 @@ alpha = 0.05 (two-sided), matching every pre-registration's own Bonferroni secti
 | L2 lead-lag wide (10 more alts) | docs/PREREG_leadlag_wide.md | 20 | KILL (all 10) | 68 |
 | S intraday seasonality | docs/PREREG_seasonality.md | 93 (31 buckets x 3 symbols, Bonferroni within-test; cumulative budget binds) | pending | 161 |
 | W vol-timed breakout | docs/PREREG_vol_timing.md | 3 (3 symbols, Bonferroni within-test; cumulative budget binds) | pending | 164 |
+| A rolling parameter self-adaptation | docs/PREREG_adaptive.md | 1 (holdout-only, adaptive vs frozen) | KILL (degenerate on dev, holdout never opened) | 165 |
 
-**Current alpha budget: 0.05 / 164 = 0.00030 (two-sided) for any test evaluated right now (includes S and W's own
-sub-test counts, pre-registered before either was run, per the rule below).**
+**Current alpha budget: 0.05 / 165 = 0.000303 (two-sided) for any test evaluated right now (includes S, W and A's
+own sub-test counts, pre-registered before any was run, per the rule below).**
 Once L2 and P run, the denominator updates to include them from the moment they're evaluated, and every prior
 KILL stays exactly as reported (this ledger doesn't retroactively change past results, only the threshold future
 ones must clear).
