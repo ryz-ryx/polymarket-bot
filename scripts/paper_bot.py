@@ -206,7 +206,7 @@ async def ticker(state, quotes, end_time, prereg):
                 p = state["pos"].get(s, {}).get("rule", "flat")
                 writer.write(ts, s, bid, ask, equity(state), p)
             if now - last_save >= 1:
-                (OUT / "state.json").write_text(json.dumps(state))
+                save_state(state)
                 writer.flush()
                 last_save = now
             if now - last_beat >= 5 and quotes:
@@ -218,15 +218,37 @@ async def ticker(state, quotes, end_time, prereg):
                 last_beat = now
             await asyncio.sleep(TICK_S)
     finally:
-        (OUT / "state.json").write_text(json.dumps(state))
+        save_state(state)
         writer.close()
         live.close()
 
 
+def save_state(state):
+    """Atomic write: a crash or kill mid-write can never leave state.json truncated/corrupted,
+    since the rename only happens after the full write succeeds (2026-09-25: recovered a
+    corrupted all-null state.json this way was NOT possible after a non-atomic write got
+    interrupted; see scripts/recover_paper_state.py, kept for reference)."""
+    tmp = OUT / "state.json.tmp"
+    tmp.write_text(json.dumps(state))
+    tmp.replace(OUT / "state.json")
+
+
+def load_state():
+    sp = OUT / "state.json"
+    if not sp.exists():
+        return new_state()
+    try:
+        return json.loads(sp.read_text())
+    except json.JSONDecodeError:
+        print(f"WARNING: {sp} is corrupted (unreadable JSON) -- starting a fresh $50 state. "
+              f"If log.jsonl exists, recover manually first with scripts/recover_paper_state.py.",
+              file=sys.stderr)
+        return new_state()
+
+
 async def run(minutes):
     OUT.mkdir(parents=True, exist_ok=True)
-    sp = OUT / "state.json"
-    state = json.loads(sp.read_text()) if sp.exists() else new_state()
+    state = load_state()
     state.setdefault("mark", {})
     quotes, closes, last_t = {}, {s: deque(maxlen=BARS_NEEDED + 50) for s in SYMBOLS}, {}
     prereg = json.loads((ROOT / "docs" / "paper_prereg.json").read_text())

@@ -1,0 +1,58 @@
+{"ts": 1789909560000, "sym": "BTCUSDT", "action": "enter", "rule": "R3_breakout", "px": 80586.75, "notional": 22.5}
+{"ts": 1789913040333, "sym": "ETHUSDT", "action": "enter", "rule": "R3_breakout", "px": 2587.6, "notional": 22.51}
+{"ts": 1789913040000, "sym": "ETHUSDT", "action": "enter", "rule": "R3_breakout", "px": 2587.56, "notional": 22.51}
+{"ts": 1789913160011, "sym": "BTCUSDT", "action": "exit", "rule": "R3_breakout", "px": 80667.31, "pnl": -0.027}
+{"ts": 1789913160000, "sym": "BTCUSDT", "action": "exit", "rule": "R3_breakout", "px": 80656.0, "pnl": -0.0347}
+{"ts": 1789913880386, "sym": "BTCUSDT", "action": "enter", "rule": "R2_reversion", "px": 80450.54, "notional": 22.43}
+{"ts": 1789913880000, "sym": "BTCUSDT", "action": "enter", "rule": "R2_reversion", "px": 80450.54, "notional": 22.44}
+{"ts": 1790073034168, "sym": "BTCUSDT", "action": "exit", "rule": "R2_reversion", "px": 85860.27, "pnl": 1.462}
+{"ts": 1790073034168, "sym": "ETHUSDT", "action": "exit", "rule": "R3_breakout", "px": 2741.04, "pnl": 1.2886}
+{"ts": 1790081519354, "sym": "ETHUSDT", "action": "enter", "rule": "R3_breakout", "px": 2754.01, "notional": 23.73}
+{"ts": 1790144326275, "sym": "ETHUSDT", "action": "exit", "rule": "R3_breakout", "px": 2760.83, "pnl": 0.0112, "mid_in": 2754.005, "mid_out": 2760.835, "qty": 0.008614923530778343, "fee_in": 0.023725585552998866, "fee_out": 0.023784339331478773}
+{"ts": 1790149497751, "sym": "BTCUSDT", "action": "enter", "rule": "R2_reversion", "px": 86057.27, "notional": 23.73}
+{"ts": 1790151297848, "sym": "BTCUSDT", "action": "exit", "rule": "R2_reversion", "px": 86179.51, "pnl": -0.0138, "mid_in": 86057.265, "mid_out": 86179.515, "qty": 0.00027575410290283216, "fee_in": 0.02373064528711681, "fee_out": 0.023764353468655654}
+{"ts": 1790153397832, "sym": "BTCUSDT", "action": "enter", "rule": "R2_reversion", "px": 85808.68, "notional": 23.72}
+{"ts": 1790153397834, "sym": "ETHUSDT", "action": "enter", "rule": "R2_reversion", "px": 2732.8, "notional": 23.71}
+{"ts": 1790155197881, "sym": "BTCUSDT", "action": "exit", "rule": "R2_reversion", "px": 85914.61, "pnl": -0.0182, "mid_in": 85808.67499999999, "mid_out": 85914.61499999999, "qty": 0.00027648066861498386, "fee_in": 0.023724441219369192, "fee_out": 0.02375372881659558}
+{"ts": 1790155197881, "sym": "ETHUSDT", "action": "exit", "rule": "R2_reversion", "px": 2738.12, "pnl": -0.0013, "mid_in": 2732.795, "mid_out": 2738.125, "qty": 0.008677460699187269, "fee_in": 0.02371376459873897, "fee_out": 0.023759928689658642}
+{"action": "error", "msg": "ConnectionClosedError(None, Close(code=<CloseCode.INTERNAL_ERROR: 1011>, reason='keepalive ping timeout'), None)", "ts": 1790156254657}
+{"ts": 1790172599918, "sym": "BTCUSDT", "action": "enter", "rule": "R2_reversion", "px": 85322.75, "notional": 23.72}
+{"ts": 1790172599922, "sym": "ETHUSDT", "action": "enter", "rule": "R2_reversion", "px": 2699.51, "notional": 23.7}
+{"ts": 1790174400008, "sym": "BTCUSDT", "action": "exit", "rule": "R2_reversion", "px": 84426.48, "pnl": -0.2963, "mid_in": 85322.745, "mid_out": 84426.485, "qty": 0.00027795243520091603, "fee_in": 0.02371566614053896, "fee_out": 0.023466545711441435}
+{"ts": 1790174400008, "sym": "ETHUSDT", "action": "exit", "rule": "R2_reversion", "px": 2668.81, "pnl": -0.3167, "mid_in": 2699.505, "mid_out": 2668.815, "qty": 0.008781220838367975, "fee_in": 0.023704993465382736, "fee_out": 0.023435409985644834}
+{"ts": 1790174520387, "sym": "ETHUSDT", "action": "enter", "rule": "R1_momentum", "px": 2671.35, "notional": 23.44}
+{"ts": 1790174760098, "sym": "BTCUSDT", "action": "enter", "rule": "R1_momentum", "px": 84371.4, "notional": 23.42}
+{"ts": 1790176320392, "sym": "ETHUSDT", "action": "exit", "rule": "R1_momentum", "px": 2679.24, "pnl": 0.0223, "mid_in": 2671.3450000000003, "mid_out": 2679.245, "qty": 0.008774516332444892, "fee_in": 0.023439804204676663, "fee_out": 0.023509035138539653}
+{"ts": 1790176560160, "sym": "BTCUSDT", "action": "exit", "rule": "R1_momentum", "px": 84742.0, "pnl": 0.0559, "mid_in": 84371.39499999999, "mid_out": 84742.005, "qty": 0.00027762008566443037, "fee_in": 0.023423195295627922, "fee_out": 0.023526081299375157}
+{"ts": 1790177880194, "sym": "ETHUSDT", "action": "enter", "rule": "R2_reversion", "px": 2664.4, "notional": 23.48}
+{"ts": 1790179320155, "sym": "BTCUSDT", "action": "enter", "rule": "R2_reversion", "px": 83705.34, "notional": 23.39}
+{"action": "error", "msg": "TimeoutError('timed out during opening handshake')", "ts": 1790240898400}
+{"action": "error", "msg": "TimeoutError('timed out during opening handshake')", "ts": 1790240916411}
+{"action": "error", "msg": "TimeoutError('timed out during opening handshake')", "ts": 1790240934434}
+{"action": "error", "msg": "TimeoutError('timed out during opening handshake')", "ts": 1790240952444}
+{"ts": 1790240977974, "sym": "BTCUSDT", "action": "exit", "rule": "R2_reversion", "px": 83647.48, "pnl": -0.0629, "mid_in": 83705.33499999999, "mid_out": 83647.485, "qty": 0.00027939612169810115, "fee_in": 0.023386947361420933, "fee_out": 0.02337078150181948}
+{"ts": 1790240977974, "sym": "ETHUSDT", "action": "exit", "rule": "R2_reversion", "px": 2668.27, "pnl": -0.0129, "mid_in": 2664.395, "mid_out": 2668.275, "qty": 0.00881061502568273, "fee_in": 0.023475002674429063, "fee_out": 0.023509099754578457}
+{"ts": 1790242379702, "sym": "ETHUSDT", "action": "enter", "rule": "R2_reversion", "px": 2641.66, "notional": 23.44}
+{"ts": 1790242439702, "sym": "BTCUSDT", "action": "enter", "rule": "R2_reversion", "px": 83029.33, "notional": 23.43}
+{"ts": 1790244179802, "sym": "ETHUSDT", "action": "exit", "rule": "R2_reversion", "px": 2643.23, "pnl": -0.033, "mid_in": 2641.6549999999997, "mid_out": 2643.2349999999997, "qty": 0.00887354462708832, "fee_in": 0.02344088789959413, "fee_out": 0.02345481936465866}
+{"ts": 1790244239784, "sym": "BTCUSDT", "action": "exit", "rule": "R2_reversion", "px": 83385.99, "pnl": 0.0537, "mid_in": 83029.32500000001, "mid_out": 83385.995, "qty": 0.000282183187370013, "fee_in": 0.02342948098459664, "fee_out": 0.023530124440204032}
+{"ts": 1790263498851, "sym": "BTCUSDT", "action": "enter", "rule": "R1_momentum", "px": 84232.01, "notional": 23.45}
+{"ts": 1790264278947, "sym": "ETHUSDT", "action": "enter", "rule": "R1_momentum", "px": 2683.08, "notional": 23.46}
+{"ts": 1790265298923, "sym": "BTCUSDT", "action": "exit", "rule": "R1_momentum", "px": 84426.0, "pnl": 0.0071, "mid_in": 84232.005, "mid_out": 84426.005, "qty": 0.0002784002390918419, "fee_in": 0.02345021172318642, "fee_out": 0.023504218585567845}
+{"ts": 1790266078972, "sym": "ETHUSDT", "action": "exit", "rule": "R1_momentum", "px": 2673.06, "pnl": -0.1345, "mid_in": 2683.075, "mid_out": 2673.065, "qty": 0.008744692682032311, "fee_in": 0.02346271004130725, "fee_out": 0.023375088220633288}
+{"ts": 1790266318898, "sym": "BTCUSDT", "action": "enter", "rule": "R2_reversion", "px": 84100.0, "notional": 23.39}
+{"ts": 1790266318900, "sym": "ETHUSDT", "action": "enter", "rule": "R2_reversion", "px": 2670.27, "notional": 23.38}
+{"action": "error", "msg": "TimeoutError('timed out during opening handshake')", "ts": 1790325255035}
+{"action": "error", "msg": "TimeoutError('timed out during opening handshake')", "ts": 1790325273061}
+{"ts": 1790325285037, "sym": "ETHUSDT", "action": "exit", "rule": "R2_reversion", "px": 2689.71, "pnl": 0.1233, "mid_in": 2670.2650000000003, "mid_out": 2689.715, "qty": 0.008756549363146038, "fee_in": 0.02338235106792797, "fee_out": 0.02355257838754753}
+{"ts": 1790325285037, "sym": "BTCUSDT", "action": "exit", "rule": "R2_reversion", "px": 84385.52, "pnl": 0.0326, "mid_in": 84099.995, "mid_out": 84385.525, "qty": 0.0002781555111664443, "fee_in": 0.023392878489097962, "fee_out": 0.02347229745064621}
+{"ts": 1790326918129, "sym": "BTCUSDT", "action": "enter", "rule": "R3_breakout", "px": 84472.01, "notional": 23.46}
+{"ts": 1790327158132, "sym": "ETHUSDT", "action": "enter", "rule": "R3_breakout", "px": 2695.97, "notional": 23.47}
+{"ts": 1790330518154, "sym": "BTCUSDT", "action": "exit", "rule": "R3_breakout", "px": 84506.36, "pnl": -0.0374, "mid_in": 84472.005, "mid_out": 84506.36499999999, "qty": 0.00027776075493167067, "fee_in": 0.023463009268195632, "fee_out": 0.02347255035012754}
+{"ts": 1790330758187, "sym": "ETHUSDT", "action": "exit", "rule": "R3_breakout", "px": 2695.47, "pnl": -0.0513, "mid_in": 2695.965, "mid_out": 2695.475, "qty": 0.008705938551000826, "fee_in": 0.023470949155341696, "fee_out": 0.023466596186066196}
+{"action": "error", "msg": "ConnectionClosedError(None, Close(code=<CloseCode.INTERNAL_ERROR: 1011>, reason='keepalive ping timeout'), None)", "ts": 1790330768900}
+{"ts": 1790332137475, "sym": "ETHUSDT", "action": "enter", "rule": "R1_momentum", "px": 2714.09, "notional": 23.42}
+{"ts": 1790333637510, "sym": "BTCUSDT", "action": "enter", "rule": "R3_breakout", "px": 84824.21, "notional": 23.42}
+{"ts": 1790333937546, "sym": "ETHUSDT", "action": "exit", "rule": "R1_momentum", "px": 2713.1, "pnl": -0.0554, "mid_in": 2714.085, "mid_out": 2713.105, "qty": 0.008630185816114843, "fee_in": 0.023423101021659135, "fee_out": 0.02341455713770118}
+{"ts": 1790334297530, "sym": "ETHUSDT", "action": "enter", "rule": "R3_breakout", "px": 2718.9, "notional": 23.39}
+{"action": "error", "msg": "ConnectionClosedError(None, Close(code=<CloseCode.INTERNAL_ERROR: 1011>, reason='keepalive ping timeout'), None)", "ts": 1790334453701}

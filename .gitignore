@@ -19,6 +19,10 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Local Claude Code tooling config, not project source
+.claude/
+.agents/
+
 # Ad-hoc analysis output
 scratch_tmp/
 skills-lock.json

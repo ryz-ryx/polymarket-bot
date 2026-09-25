@@ -1,0 +1,39 @@
+name: Paper bot (frozen forward test)
+
+# Runs the frozen BTC/ETH paper bot for ~5.3 hours per job (under Actions' 6h hard cap), then a
+# new scheduled run picks up from the committed data/paper/state.json. See docs/FREEZE.md -- this
+# workflow must not change trading or sizing parameters; it only changes WHERE the process runs.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"  # every 6 hours; each run does ~5.3h of active trading, leaving margin
+  workflow_dispatch: {}     # manual trigger from the Actions tab
+
+concurrency:
+  group: paper-bot
+  cancel-in-progress: false  # never kill a run mid-trade; let it finish and the next scheduled run waits
+
+permissions:
+  contents: write  # needed to commit state.json / status.json back to the repo
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # hard stop just under GitHub's 360-minute job limit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure git identity for status commits
+        run: |
+          git config user.name "paper-bot"
+          git config user.email "paper-bot@users.noreply.github.com"
+
+      - name: Run bot for ~5.3h with periodic status commits
+        run: bash scripts/actions_runner.sh

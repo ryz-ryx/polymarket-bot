@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paper bot status</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; line-height: 1.5; }
+  h1 { font-size: 1.4rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 24px 0; }
+  .card { border: 1px solid rgba(128,128,128,0.3); border-radius: 8px; padding: 12px 16px; }
+  .card .label { font-size: 0.75rem; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .value { font-size: 1.5rem; font-weight: 600; margin-top: 4px; }
+  .progress-bar { height: 8px; border-radius: 4px; background: rgba(128,128,128,0.2); overflow: hidden; margin-top: 6px; }
+  .progress-fill { height: 100%; background: #3b82f6; }
+  pre { background: rgba(128,128,128,0.1); padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 0.8rem; }
+  .stale { color: #dc2626; font-weight: 600; }
+  a { color: #3b82f6; }
+</style>
+</head>
+<body>
+<h1>Frozen BTC/ETH paper bot -- live status</h1>
+<p>Forward test per <a href="https://github.com/ryz-ryx/polymarket-bot/blob/main/docs/FREEZE.md">docs/FREEZE.md</a>.
+Paper trading only, no real funds. Runs on GitHub Actions in ~5.3h scheduled chunks.</p>
+
+<div id="freshness"></div>
+
+<div class="grid" id="cards"></div>
+
+<div class="card" style="margin-bottom:24px">
+  <div class="label">Progress toward 200-trade verdict</div>
+  <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+  <div id="progress-text" style="margin-top:6px; font-size:0.85rem;"></div>
+</div>
+
+<h2>Recent log</h2>
+<pre id="log">loading...</pre>
+
+<script>
+async function load() {
+  const res = await fetch('status.json?_=' + Date.now());
+  const s = await res.json();
+
+  const updated = new Date(s.updated_utc);
+  const ageMin = (Date.now() - updated.getTime()) / 60000;
+  const freshnessEl = document.getElementById('freshness');
+  freshnessEl.innerHTML = `Last updated: ${updated.toLocaleString()} ` +
+    (ageMin > 15 ? `<span class="stale">(${ageMin.toFixed(0)} min ago -- may be between scheduled runs)</span>`
+                 : `(${ageMin.toFixed(0)} min ago)`);
+
+  const cards = [
+    ['Equity', '$' + s.equity.toFixed(2)],
+    ['Cash', '$' + s.cash.toFixed(2)],
+    ['Trades', s.trades],
+    ['Fees paid', '$' + s.fees.toFixed(3)],
+    ['Closed PnL', (s.closed_pnl >= 0 ? '+' : '') + '$' + s.closed_pnl.toFixed(3)],
+    ['Open positions', s.open_positions.length ? s.open_positions.join(', ') : 'flat'],
+  ];
+  document.getElementById('cards').innerHTML = cards.map(([label, value]) =>
+    `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`
+  ).join('');
+
+  const pct = Math.min(100, (s.trades / s.target_trades) * 100);
+  document.getElementById('progress-fill').style.width = pct.toFixed(1) + '%';
+  document.getElementById('progress-text').textContent =
+    `${s.trades} / ${s.target_trades} trades (${pct.toFixed(1)}%)`;
+
+  document.getElementById('log').textContent = (s.recent_log || []).join('\n') || '(no log yet)';
+}
+load().catch(e => {
+  document.getElementById('freshness').innerHTML =
+    '<span class="stale">status.json not available yet -- the bot may not have run yet.</span>';
+});
+</script>
+</body>
+</html>
