@@ -1,7 +1,7 @@
 {
-  "updated_utc": "2026-09-26T15:33:03.075738+00:00",
+  "updated_utc": "2026-09-26T15:38:04.162556+00:00",
   "cash": 28.1143,
-  "equity": 51.2144,
+  "equity": 51.21,
   "trades": 25,
   "fees": 1.3568,
   "closed_pnl": 1.2847,
@@ -10,15 +10,15 @@
   ],
   "target_trades": 200,
   "recent_log": [
-    "15:32:13 bid/ask BTCUSDT=84108.87/84108.88 ETHUSDT=2692.84/2692.85 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.20 trades=25 fees=1.357 pnl=1.285",
-    "15:32:18 bid/ask BTCUSDT=84108.87/84108.88 ETHUSDT=2693.12/2693.13 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
-    "15:32:23 bid/ask BTCUSDT=84108.87/84108.88 ETHUSDT=2693.12/2693.13 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
-    "15:32:28 bid/ask BTCUSDT=84108.87/84108.88 ETHUSDT=2693.12/2693.13 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
-    "15:32:33 bid/ask BTCUSDT=84108.87/84108.88 ETHUSDT=2693.12/2693.13 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
-    "15:32:38 bid/ask BTCUSDT=84139.16/84139.17 ETHUSDT=2693.39/2693.51 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
-    "15:32:43 bid/ask BTCUSDT=84139.16/84139.17 ETHUSDT=2694.11/2694.16 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
-    "15:32:48 bid/ask BTCUSDT=84139.16/84139.17 ETHUSDT=2694.17/2694.18 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
-    "15:32:53 bid/ask BTCUSDT=84122.83/84122.84 ETHUSDT=2694.06/2694.07 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
-    "15:32:58 bid/ask BTCUSDT=84139.09/84139.10 ETHUSDT=2694.20/2694.21 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285"
+    "15:37:14 bid/ask BTCUSDT=84137.35/84137.36 ETHUSDT=2693.65/2693.99 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
+    "15:37:19 bid/ask BTCUSDT=84137.35/84137.36 ETHUSDT=2693.66/2693.84 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
+    "15:37:24 bid/ask BTCUSDT=84137.35/84137.36 ETHUSDT=2693.86/2694.09 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
+    "15:37:29 bid/ask BTCUSDT=84137.35/84137.36 ETHUSDT=2693.89/2694.13 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
+    "15:37:34 bid/ask BTCUSDT=84137.35/84137.36 ETHUSDT=2694.00/2694.01 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
+    "15:37:39 bid/ask BTCUSDT=84137.35/84137.36 ETHUSDT=2694.17/2694.18 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
+    "15:37:45 bid/ask BTCUSDT=84130.53/84137.36 ETHUSDT=2693.87/2694.10 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
+    "15:37:50 bid/ask BTCUSDT=84130.12/84130.13 ETHUSDT=2694.02/2694.03 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
+    "15:37:55 bid/ask BTCUSDT=84135.22/84135.23 ETHUSDT=2694.02/2694.03 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285",
+    "15:38:00 bid/ask BTCUSDT=84135.22/84135.23 ETHUSDT=2693.70/2693.71 pos=ETHUSDT:R3_breakout cash=28.11 equity=51.21 trades=25 fees=1.357 pnl=1.285"
   ]
 }
