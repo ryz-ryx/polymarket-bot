@@ -1,13 +1,24 @@
-"""Paper-only fast trading bot on Binance spot BTC/ETH, live websocket prices, 100 ms account refresh.
+"""Paper-only fast trading bot on Coinbase spot BTC/ETH, live websocket prices, 100 ms account refresh.
 
 Runs the three pre-registered fast rules (docs/PREREG_fast_intraday.md) on 1-minute bars; entries fill at the live ASK and
-exits at the live BID (real spread) plus a 0.10% fee per side, on a $50 paper account. NO keys, NO orders: it only reads
+exits at the live BID (real spread) plus a taker fee per side, on a $50 paper account. NO keys, NO orders: it only reads
 public market data. Everything is stored under data/paper/:
   ticks_YYYYMMDD_HH.csv(.gz)  100 ms snapshots (bid, ask, equity, position)
   log.jsonl                   every enter/exit/error event
   live.log                    human-readable status every 5 s
   state.json                  account state, saved every second
 These rules had no measurable gross edge in backtests, so expect losses about equal to fees; this bot measures that live.
+
+DATA SOURCE (2026-09-26): switched from Binance to Coinbase. Binance blocks connections from US IP ranges (HTTP 451
+"Unavailable For Legal Reasons" on every attempt) once this bot moved to GitHub Actions' US-based hosted runners --
+confirmed via diagnostic logging, 19+ hours of silently failed reconnect attempts before this was caught. Coinbase is a
+US-regulated exchange and does not block US IPs. This changes two things beyond just the network layer, disclosed here
+rather than left implicit: (1) FEE below is now Coinbase's ~0.40% taker fee, not Binance's 0.10% -- a real, higher cost
+assumption; (2) Coinbase's ticker feed does not push exchange-computed closed-candle events the way Binance's kline
+stream did, so 1-minute bars are now built client-side from the ticker price stream (standard OHLC aggregation: track
+the current minute bucket, roll over and emit a close when the minute changes). Internal symbol keys (BTCUSDT, ETHUSDT)
+are unchanged for continuity with the 24 trades already recorded under those keys; only the network layer maps them to
+Coinbase's BTC-USD/ETH-USD product IDs.
 """
 import asyncio
 import csv
@@ -27,15 +38,14 @@ from fast_backtest import RULES, signals  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "data" / "paper"
-FEE = 0.001  # Binance spot taker fee per side; the spread is paid explicitly via bid/ask fills
+FEE = 0.004  # Coinbase Exchange lowest-tier taker fee (~0.40%); the spread is paid explicitly via bid/ask fills
 SIZE_FRAC = 0.45
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+PRODUCT = {"BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD"}
 BARS_NEEDED = 1601  # signals() needs a 1440-minute volatility window plus a 15-minute return
-PAGES = 2  # 1000 bars per REST request
 TICK_S = 0.1
-REST = "https://data-api.binance.vision/api/v3/klines?symbol={s}&interval=1m&limit=1000"
-WS = "wss://stream.binance.com:9443/stream?streams=" + "/".join(
-    f"{s.lower()}@bookTicker/{s.lower()}@kline_1m" for s in SYMBOLS)
+CANDLES_URL = "https://api.exchange.coinbase.com/products/{p}/candles?granularity=60&start={start}&end={end}"
+WS = "wss://ws-feed.exchange.coinbase.com"
 
 
 def new_state(cash=50.0):
@@ -109,15 +119,30 @@ def on_bar_close(state, sym, closes, ask, ts, bid=None):
 
 
 def fetch_closed(sym):
-    """Last ~2000 CLOSED 1-minute closes from REST (used at start and after a reconnect)."""
-    rows, end = [], ""
-    for _ in range(PAGES):
-        with urllib.request.urlopen(REST.format(s=sym) + end, timeout=20) as r:
+    """Last ~1601 CLOSED 1-minute closes from Coinbase REST (used at start and after a reconnect).
+    Coinbase caps each request at 300 candles, so this paginates backward with start/end (seconds)
+    until enough history is collected. Returns (closes, last_t_ms) -- last_t_ms is the ms epoch of
+    the most recent closed bar's minute-bucket start, matching the unit used by consume()'s
+    client-side bar aggregation."""
+    product = PRODUCT[sym]
+    now = int(time.time())
+    now -= now % 60  # align to the current minute boundary; that candle isn't closed yet
+    rows = {}
+    end = now
+    floor = now - (BARS_NEEDED + 10) * 60
+    while len(rows) < BARS_NEEDED and end > floor:
+        start = max(end - 300 * 60, floor)
+        req = urllib.request.Request(CANDLES_URL.format(p=product, start=start, end=end),
+                                      headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
             page = json.loads(r.read())
-        rows = page + rows
-        end = f"&endTime={int(page[0][0]) - 1}"
-    rows = rows[:-1]  # drop the still-open candle
-    return [float(b[4]) for b in rows], int(rows[-1][0])
+        if not page:
+            break
+        for row in page:
+            rows[int(row[0])] = float(row[4])
+        end = start - 60
+    times = sorted(rows.keys())[-BARS_NEEDED:]
+    return [rows[t] for t in times], times[-1] * 1000
 
 
 class TickWriter:
@@ -159,8 +184,16 @@ def log_event(ev):
 
 
 async def consume(state, quotes, closes, last_t, end_time):
+    """Coinbase's ticker channel gives best_bid/best_ask per update but no exchange-computed
+    closed-candle event (unlike Binance's kline stream this used to read). 1-minute bars are built
+    here client-side: track the current minute bucket per symbol, and when a ticker for a symbol
+    arrives in a NEW minute, the previous bucket's last-seen price is that bar's close."""
     import websockets
     msg_count = 0
+    reverse_product = {v: k for k, v in PRODUCT.items()}
+    cur_minute = {s: None for s in SYMBOLS}
+    cur_price = {s: None for s in SYMBOLS}
+
     while time.time() < end_time:
         try:
             print(f"[consume] connecting to {WS}", file=sys.stderr, flush=True)
@@ -170,7 +203,11 @@ async def consume(state, quotes, closes, last_t, end_time):
                     closes[s].clear()
                     cl, last_t[s] = fetch_closed(s)
                     closes[s].extend(cl)
-                print(f"[consume] initial bars loaded for {SYMBOLS}, entering message loop", file=sys.stderr, flush=True)
+                    cur_minute[s] = None
+                sub = {"type": "subscribe", "product_ids": [PRODUCT[s] for s in SYMBOLS], "channels": ["ticker"]}
+                await ws.send(json.dumps(sub))
+                print(f"[consume] initial bars loaded for {SYMBOLS}, subscribed, entering message loop",
+                      file=sys.stderr, flush=True)
                 async for raw in ws:
                     if time.time() >= end_time:
                         return
@@ -178,18 +215,28 @@ async def consume(state, quotes, closes, last_t, end_time):
                     if msg_count % 500 == 1:
                         print(f"[consume] {msg_count} ws messages received so far, quotes={list(quotes.keys())}",
                               file=sys.stderr, flush=True)
-                    d = json.loads(raw)["data"]
-                    if "k" in d:
-                        k, s = d["k"], d["k"]["s"]
-                        if k["x"] and int(k["t"]) > last_t[s]:
-                            last_t[s] = int(k["t"])
-                            closes[s].append(float(k["c"]))
-                            if s in quotes:
-                                for ev in on_bar_close(state, s, closes[s], quotes[s][1], int(time.time() * 1000),
-                                                 bid=quotes[s][0]):
-                                    log_event(ev)
-                    else:
-                        quotes[d["s"]] = (float(d["b"]), float(d["a"]))
+                    d = json.loads(raw)
+                    if d.get("type") != "ticker":
+                        continue
+                    s = reverse_product.get(d.get("product_id"))
+                    if s is None or d.get("best_bid") is None or d.get("best_ask") is None:
+                        continue
+                    quotes[s] = (float(d["best_bid"]), float(d["best_ask"]))
+                    price = float(d.get("price", (quotes[s][0] + quotes[s][1]) / 2))
+                    now_ms = int(time.time() * 1000)
+                    minute = now_ms // 60_000
+
+                    if cur_minute[s] is None:
+                        cur_minute[s] = minute
+                    elif minute > cur_minute[s]:
+                        bar_close_ms = cur_minute[s] * 60_000
+                        if bar_close_ms > last_t[s] and cur_price[s] is not None:
+                            last_t[s] = bar_close_ms
+                            closes[s].append(cur_price[s])
+                            for ev in on_bar_close(state, s, closes[s], quotes[s][1], now_ms, bid=quotes[s][0]):
+                                log_event(ev)
+                        cur_minute[s] = minute
+                    cur_price[s] = price
         except Exception as e:  # network drop: log, wait, reconnect
             print(f"[consume] EXCEPTION: {repr(e)[:300]}", file=sys.stderr, flush=True)
             log_event({"action": "error", "msg": repr(e)[:150], "ts": int(time.time() * 1000)})
