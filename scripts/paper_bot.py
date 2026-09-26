@@ -160,16 +160,24 @@ def log_event(ev):
 
 async def consume(state, quotes, closes, last_t, end_time):
     import websockets
+    msg_count = 0
     while time.time() < end_time:
         try:
+            print(f"[consume] connecting to {WS}", file=sys.stderr, flush=True)
             async with websockets.connect(WS, open_timeout=15, ping_interval=20) as ws:
+                print("[consume] connected, fetching initial closed bars", file=sys.stderr, flush=True)
                 for s in SYMBOLS:  # re-sync bars in case we were disconnected
                     closes[s].clear()
                     cl, last_t[s] = fetch_closed(s)
                     closes[s].extend(cl)
+                print(f"[consume] initial bars loaded for {SYMBOLS}, entering message loop", file=sys.stderr, flush=True)
                 async for raw in ws:
                     if time.time() >= end_time:
                         return
+                    msg_count += 1
+                    if msg_count % 500 == 1:
+                        print(f"[consume] {msg_count} ws messages received so far, quotes={list(quotes.keys())}",
+                              file=sys.stderr, flush=True)
                     d = json.loads(raw)["data"]
                     if "k" in d:
                         k, s = d["k"], d["k"]["s"]
@@ -183,6 +191,7 @@ async def consume(state, quotes, closes, last_t, end_time):
                     else:
                         quotes[d["s"]] = (float(d["b"]), float(d["a"]))
         except Exception as e:  # network drop: log, wait, reconnect
+            print(f"[consume] EXCEPTION: {repr(e)[:300]}", file=sys.stderr, flush=True)
             log_event({"action": "error", "msg": repr(e)[:150], "ts": int(time.time() * 1000)})
             await asyncio.sleep(3)
 
