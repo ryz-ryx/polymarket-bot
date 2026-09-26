@@ -1,5 +1,5 @@
 {
-  "updated_utc": "2026-09-26T17:38:33.141225+00:00",
+  "updated_utc": "2026-09-26T17:43:34.204655+00:00",
   "cash": 51.0925,
   "equity": 51.0925,
   "trades": 25,
@@ -8,15 +8,15 @@
   "open_positions": [],
   "target_trades": 200,
   "recent_log": [
-    "17:37:44 bid/ask BTCUSDT=84063.13/84063.14 ETHUSDT=2688.62/2688.63 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
-    "17:37:49 bid/ask BTCUSDT=84063.13/84063.14 ETHUSDT=2688.62/2688.63 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
-    "17:37:54 bid/ask BTCUSDT=84063.13/84063.14 ETHUSDT=2688.62/2688.63 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
-    "17:37:59 bid/ask BTCUSDT=84063.13/84063.14 ETHUSDT=2688.62/2688.63 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
-    "17:38:04 bid/ask BTCUSDT=84063.13/84063.14 ETHUSDT=2688.43/2688.63 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
-    "17:38:09 bid/ask BTCUSDT=84063.13/84063.14 ETHUSDT=2688.32/2688.42 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
-    "17:38:14 bid/ask BTCUSDT=84063.13/84063.14 ETHUSDT=2688.38/2688.41 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
-    "17:38:19 bid/ask BTCUSDT=84063.13/84063.14 ETHUSDT=2688.42/2688.44 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
-    "17:38:24 bid/ask BTCUSDT=84063.13/84063.14 ETHUSDT=2688.10/2688.27 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
-    "17:38:29 bid/ask BTCUSDT=84063.13/84063.14 ETHUSDT=2688.16/2688.26 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092"
+    "17:42:46 bid/ask BTCUSDT=84068.42/84068.43 ETHUSDT=2687.50/2687.99 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
+    "17:42:51 bid/ask BTCUSDT=84068.42/84070.12 ETHUSDT=2687.50/2687.99 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
+    "17:42:56 bid/ask BTCUSDT=84069.77/84069.78 ETHUSDT=2687.91/2687.92 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
+    "17:43:01 bid/ask BTCUSDT=84071.15/84071.16 ETHUSDT=2687.91/2687.92 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
+    "17:43:06 bid/ask BTCUSDT=84072.83/84074.53 ETHUSDT=2688.03/2688.31 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
+    "17:43:11 bid/ask BTCUSDT=84074.99/84075.00 ETHUSDT=2688.17/2688.31 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
+    "17:43:16 bid/ask BTCUSDT=84077.83/84077.84 ETHUSDT=2688.19/2688.29 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
+    "17:43:21 bid/ask BTCUSDT=84077.83/84077.84 ETHUSDT=2688.19/2688.29 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
+    "17:43:26 bid/ask BTCUSDT=84077.83/84077.84 ETHUSDT=2688.20/2688.27 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092",
+    "17:43:31 bid/ask BTCUSDT=84077.83/84077.84 ETHUSDT=2688.20/2688.26 pos=flat cash=51.09 equity=51.09 trades=25 fees=1.449 pnl=1.092"
   ]
 }
